@@ -19,9 +19,9 @@ fi
 BUILD_PLATFORMS_MAKEFLAGS=${CSI_PROW_BUILD_PLATFORMS// /\\ }
 export MAKEFLAGS="${MAKEFLAGS:+${MAKEFLAGS} }BUILD_PLATFORMS=${BUILD_PLATFORMS_MAKEFLAGS}"
 
-# Taken from https://github.com/kubernetes/test-infra/blob/d51e148c34558d18b492a52bdb3e4a0e84492359/config/jobs/kubernetes-csi/external-attacher/external-attacher-config.yaml#L131
-export CSI_PROW_GO_VERSION_BUILD="1.26.5"
-export CSI_PROW_GO_VERSION_E2E="1.26.5"
+# Keep local Prow builds aligned with the Cloud Build toolchain default.
+export CSI_PROW_GO_VERSION_BUILD="1.26.6"
+export CSI_PROW_GO_VERSION_E2E="1.26.6"
 # This variable controls:
 # - The version to use in kind
 # - After pulling the k8s codebase, the tag to checkou to.

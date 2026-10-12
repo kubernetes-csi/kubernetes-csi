@@ -60,7 +60,7 @@ jobs:
       contents: read
     strategy:
       matrix:
-        go: ["1.26.5"]
+        go: ["1.26.6"]
     steps:
     - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
       with:

@@ -20,37 +20,14 @@ production readiness for the combined process.
 
 Coordinated lifecycle management, shared diagnostics endpoints, complete
 multi-controller in-cluster coverage, and the final release pipeline remain in
-progress. Generated assembly sources are not yet committed; the user story below
-describes the intended build experience once that work is ready.
-
-## User story
-
-> As a user, I want a fresh checkout to contain the generated source and pinned
-> dependencies required by the build, so that I can build the project directly
-> without running the repository assembly process or fetching the individual CSI
-> component repositories.
-
-Once the sync tooling is ready, its generated assembly will be committed to this
-repository. This includes generated command and package sources,
-Go module metadata, and vendored dependencies required
-for an offline, reproducible build.
-
-The intended workflow is:
-
-- Users clone the repository and build it directly; running the sync tooling is
-  not part of the user build path.
-- Maintainers update the hand-maintained sources and source locks, run the sync
-  tooling, and commit the resulting generated changes separately for review.
-- Generated files are not edited by hand and retain enough source provenance to
-  identify the upstream component revisions from which they were assembled.
-- CI regenerates the assembly from the committed sources and locks, then fails
-  if the working tree differs from the committed generated output.
-
-This model reduces the setup and network requirements for users while keeping
-source updates reviewable and reproducible for maintainers.
+progress. Generated assembly sources are not yet committed; a fresh checkout
+currently requires sync before building. See the development guide for the
+current workflow.
 
 ## Documentation
 
+- [Development guide](DEVELOPMENT.md) covers building, using the outputs, source
+  changes, and local validation.
 - [Code layout](CODE_LAYOUT.md) explains the hand-maintained and generated
   source layers.
 - [Assembly tools](tools/README.md) documents source locks, synchronization,

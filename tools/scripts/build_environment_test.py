@@ -51,7 +51,7 @@ class BuildEnvironmentTests(unittest.TestCase):
         for arch in ("amd64", "arm64"):
             self.assertEqual(build.select_image(lock, arch=arch), lock["images"][arch])
             with self.assertRaisesRegex(ValueError, "unlocked builder"):
-                build.select_image(lock, "golang:1.26.5", arch=arch)
+                build.select_image(lock, "golang:1.26.6", arch=arch)
 
     def test_duplicate_keys_and_symlinks_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

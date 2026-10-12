@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "images": {
-    "amd64": "docker.io/library/golang@sha256:55d3b3d8ea3ae125d21f528f392a7ae0efbd9c69cbac7a479921121af3c7b2a2",
-    "arm64": "docker.io/library/golang@sha256:04b188c2db8449ea15c09355dfab9ce9ed4ecf9414e94674104e316bda7d1996"
+    "amd64": "docker.io/library/golang@sha256:23fdfd3a6abc97c81e32a724cdd1cf541c06c416eb04d717815f4ed7c75623d0",
+    "arm64": "docker.io/library/golang@sha256:a0c0dd6888e2a1df54a00fcafe855e3035dcf9b5733cdf803d6ccf70a56df809"
   },
   "versions": {
-    "go": "go1.26.5",
+    "go": "go1.26.6",
     "python": "3.13.5",
     "gcc": "14.2.0",
     "git": "2.47.3"

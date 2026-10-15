@@ -1,0 +1,85 @@
+name: presubmit
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The hostpath Prow suite is a full kind-based e2e run; it is expensive to run
+  # on every pull request. Run it on a weekly schedule (Mondays 06:00 UTC) so
+  # regressions against the locked upstream sources are caught even when no PR
+  # touches the e2e path. The lint/build jobs still run on every push and PR.
+  schedule:
+    - cron: "0 6 * * 1"
+jobs:
+  # verify runs the code-quality gates that upstream kubernetes-csi expects
+  # (gofmt, boilerplate license headers, shellcheck). These are scoped
+  # to the hand-maintained source of truth under tools/ and to the shell
+  # scripts we own. This lint job does not cover the generated assembly area
+  # (cmd/, pkg/). Upstream CI does not validate our transformations
+  # or unified dependencies; those need assembled-tree tests, not just lint.
+  verify:
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+    - name: preload locked Linux builder
+      run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
+    - name: tooling tests, gofmt, and license headers in locked builder
+      run: python3 -B tools/scripts/isolated_sync.py --engine docker --tooling-only
+    # shellcheck: lint the shell scripts we own (sync/cleanup + CI entrypoints).
+    # --severity=warning keeps the gate on real bugs/warnings while allowing
+    # info-level style suggestions (e.g. SC2086 quoting) that would otherwise
+    # add noise to the tightly-tuned sync.sh. shellcheck is preinstalled on
+    # ubuntu-latest runners.
+    - name: shellcheck
+      run: shellcheck --severity=warning tools/scripts/*.sh .prow.sh .cloudbuild.sh
+
+  build:
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+    - name: preload locked Linux builder
+      run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
+    # Generates the assembly from the locked sources inside the locked builder and
+    # compiles it (sync.sh runs the maintained-package tests, `make build`, and
+    # --help smoke checks). The generated tree is build output and stays
+    # uncommitted, so every job assembles it first.
+    - name: locked assembly, build, and maintained-package checks
+      run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
+
+  e2e-hostpath:
+    # Full kind-based e2e: run weekly (schedule) and on demand (workflow_dispatch),
+    # not on every pull request. Pass the PR/push PR number via a comment-trigger
+    # or manual dispatch when an on-demand e2e run is needed.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        go: ["1.26.6"]
+    steps:
+    - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ matrix.go }}
+    - run: |
+        echo "GOPATH=$(go env GOPATH)" >> $GITHUB_ENV
+    - run: go version
+    # sync.sh only runs inside the locked builder (it requires the builder
+    # identity and exact locked tool versions); the container mounts this
+    # workspace, so the generated tree stays for the Prow e2e run below.
+    - name: preload locked Linux builder
+      run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
+    - name: locked assembly into the workspace
+      run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
+    - name: run hostpath Prow suite
+      run: |
+        set -o pipefail
+        ./.prow.sh 2>&1 | tee .prow.sh.log
+    - run: grep "Ginkgo ran" -B 4 .prow.sh.log

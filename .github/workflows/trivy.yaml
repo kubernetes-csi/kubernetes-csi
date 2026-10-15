@@ -1,0 +1,204 @@
+---
+# Build the images, report known vulnerabilities, publish SPDX SBOMs, and
+# attest artifacts produced by trusted branch and scheduled runs.
+#
+# Because the sidecar source is synced/generated from the upstream
+# kubernetes-csi repositories, dependency-level fixes usually have to land
+# upstream first. The scan therefore runs in report-only mode (exit-code: 0)
+# so it surfaces findings in the job log without blocking PRs on issues that
+# cannot be fixed in this repository.
+name: Image security and provenance
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
+jobs:
+  build:
+    name: Build, scan, and package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Parse go version from .prow.sh
+        id: go-version
+        run: |
+          GO_VERSION=$(sed -n -E 's/^export CSI_PROW_GO_VERSION_BUILD="?([0-9.]+)"?.*$/\1/p' .prow.sh)
+          if [ -z "$GO_VERSION" ]; then
+            echo "CSI_PROW_GO_VERSION_BUILD not found in .prow.sh" >&2
+            exit 1
+          fi
+          echo "Using go: $GO_VERSION"
+          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go-version.outputs.go }}
+
+      - name: Preload locked Linux builder
+        run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
+
+      # sync.sh only runs inside the locked builder (it requires the builder
+      # identity and exact locked tool versions); the container mounts this
+      # workspace, so the generated tree stays for `make container` below.
+      - name: Sync the assembly area from upstream kubernetes-csi repositories
+        run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
+
+      - name: Build images from Dockerfile
+        # `make container` builds every cmd in the Makefile's CMDS list
+        # (kept current by sync.sh); the scans below stay in one job so they
+        # share the Trivy DB downloaded by the first scan.
+        run: make container
+
+      # A scanner cannot detect that an image was packaged with the wrong
+      # component. Fail on bad entrypoints, wrong binaries, or broken CLIs
+      # even though vulnerability findings below are report-only.
+      - name: Verify image contents and component CLIs
+        run: python3 tools/scripts/verify_artifacts.py images
+
+      - name: Run Trivy vulnerability scanner on csi-sidecars image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
+        with:
+          image-ref: 'csi-sidecars:latest'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
+
+      - name: Run Trivy vulnerability scanner on snapshot-controller image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
+        with:
+          image-ref: 'snapshot-controller:latest'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
+
+      - name: Run Trivy vulnerability scanner on snapshot-conversion-webhook image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
+        with:
+          image-ref: 'snapshot-conversion-webhook:latest'
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
+
+      - name: Create supply-chain metadata directory
+        run: mkdir -p artifacts/metadata
+
+      - name: Generate csi-sidecars SPDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'csi-sidecars:latest'
+          format: 'spdx-json'
+          output: 'artifacts/metadata/csi-sidecars.spdx.json'
+
+      - name: Generate snapshot-controller SPDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'snapshot-controller:latest'
+          format: 'spdx-json'
+          output: 'artifacts/metadata/snapshot-controller.spdx.json'
+
+      - name: Generate snapshot-conversion-webhook SPDX SBOM
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: 'snapshot-conversion-webhook:latest'
+          format: 'spdx-json'
+          output: 'artifacts/metadata/snapshot-conversion-webhook.spdx.json'
+
+      - name: Collect and validate supply-chain metadata
+        run: |
+          cp tmp/source-provenance.json artifacts/metadata/source-provenance.json
+          for file in \
+            artifacts/metadata/csi-sidecars.spdx.json \
+            artifacts/metadata/snapshot-controller.spdx.json \
+            artifacts/metadata/snapshot-conversion-webhook.spdx.json \
+            artifacts/metadata/source-provenance.json; do
+            test -s "$file"
+          done
+
+      - name: Upload supply-chain metadata
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: csi-supply-chain-metadata-${{ github.sha }}
+          path: artifacts/metadata/
+          if-no-files-found: error
+
+      - name: Export image archives for attestation
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+        run: |
+          mkdir -p artifacts/images
+          docker save --output artifacts/images/csi-sidecars.tar csi-sidecars:latest
+          docker save --output artifacts/images/snapshot-controller.tar snapshot-controller:latest
+          docker save --output artifacts/images/snapshot-conversion-webhook.tar snapshot-conversion-webhook:latest
+
+      - name: Upload image archives for attestation
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: csi-image-archives-${{ github.sha }}
+          path: artifacts/images/
+          compression-level: 0
+          if-no-files-found: error
+
+  attest:
+    name: Attest image archives
+    needs: build
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download image archives
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: csi-image-archives-${{ github.sha }}
+          path: artifacts/images
+
+      - name: Download supply-chain metadata
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: csi-supply-chain-metadata-${{ github.sha }}
+          path: artifacts/metadata
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: 'artifacts/images/*.tar'
+
+      - name: Attest csi-sidecars SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: 'artifacts/images/csi-sidecars.tar'
+          sbom-path: 'artifacts/metadata/csi-sidecars.spdx.json'
+
+      - name: Attest snapshot-controller SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: 'artifacts/images/snapshot-controller.tar'
+          sbom-path: 'artifacts/metadata/snapshot-controller.spdx.json'
+
+      - name: Attest snapshot-conversion-webhook SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: 'artifacts/images/snapshot-conversion-webhook.tar'
+          sbom-path: 'artifacts/metadata/snapshot-conversion-webhook.spdx.json'

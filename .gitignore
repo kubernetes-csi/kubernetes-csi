@@ -1,0 +1,17 @@
+# Assembly output produced by tools/scripts/sync.sh
+/pkg/
+/cmd/
+/vendor/
+/go.mod
+/go.sum
+# Legacy library/workspace output: no longer generated, still cleaned up.
+/staging/
+/go.work
+/go.work.sum
+/bin/
+/tmp/
+/.assembly-env/
+.venv
+venv
+.DS_Store
+__pycache__/

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "images": {
+    "amd64": "docker.io/library/golang@sha256:23fdfd3a6abc97c81e32a724cdd1cf541c06c416eb04d717815f4ed7c75623d0",
+    "arm64": "docker.io/library/golang@sha256:a0c0dd6888e2a1df54a00fcafe855e3035dcf9b5733cdf803d6ccf70a56df809"
+  },
+  "versions": {
+    "go": "go1.26.6",
+    "python": "3.13.5",
+    "gcc": "14.2.0",
+    "git": "2.47.3"
+  },
+  "python_packages": {
+    "pip": {
+      "version": "26.2",
+      "filename": "pip-26.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/62/36/a3aed958d60531cb442b7ab4596cda7b3621cfb916f8ae1d6769795c7dc1/pip-26.2-py3-none-any.whl",
+      "sha256": "931c303696af6fa3417112103b1cad26890e5a07eccb5b99783700e33f2b8aad"
+    },
+    "git-filter-repo": {
+      "version": "2.47.0",
+      "filename": "git_filter_repo-2.47.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/60/60/d3943f0880ebcb7e0bdf79254d10dddd39c7b656eeecae32b8806ff66dec/git_filter_repo-2.47.0-py3-none-any.whl",
+      "sha256": "2cd04929b9024e83e65db571cbe36aec65ead0cb5f9ec5abe42158654af5ad83"
+    }
+  }
+}

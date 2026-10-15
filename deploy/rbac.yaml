@@ -1,0 +1,123 @@
+# Shared RBAC for user deployments and the hostpath e2e fixture.
+# This is the only maintained RBAC manifest for the AIO sidecars. Update it
+# manually when controller requirements change; do not regenerate it from sync.
+# See deploy/README.md for namespace customization and upgrade notes.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: csi-sidecars
+  namespace: default
+  labels:
+    app.kubernetes.io/name: csi-sidecars
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: csi-sidecars-runner
+  labels:
+    app.kubernetes.io/name: csi-sidecars
+rules:
+# Combined attacher, provisioner, resizer, snapshotter and health-monitor access.
+# Resources are grouped only when they have the same verbs.
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch", "create", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims/status"]
+  verbs: ["patch"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses", "csinodes", "volumeattributesclasses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["volumeattachments"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["volumeattachments/status"]
+  verbs: ["patch"]
+# Snapshot source protection and sidecar snapshot operations.
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots"]
+  verbs: ["get", "list", "watch", "update"]
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotclasses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotcontents"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotcontents/status"]
+  verbs: ["update", "patch"]
+- apiGroups: ["groupsnapshot.storage.k8s.io"]
+  resources: ["volumegroupsnapshotclasses"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["groupsnapshot.storage.k8s.io"]
+  resources: ["volumegroupsnapshotcontents"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["groupsnapshot.storage.k8s.io"]
+  resources: ["volumegroupsnapshotcontents/status"]
+  verbs: ["update", "patch"]
+# Secret and ReferenceGrant permissions are intentionally not granted here.
+# Add narrowly scoped access if required by the driver or enabled features.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: csi-sidecars-role
+  labels:
+    app.kubernetes.io/name: csi-sidecars
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: csi-sidecars-runner
+subjects:
+- kind: ServiceAccount
+  name: csi-sidecars
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: csi-sidecars-cfg
+  namespace: default
+  labels:
+    app.kubernetes.io/name: csi-sidecars
+rules:
+# Keep leadership and capacity publishing permissions in the deployment namespace.
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "delete"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["csistoragecapacities"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Walk the owner chain when publishing CSIStorageCapacity.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: csi-sidecars-role-cfg
+  namespace: default
+  labels:
+    app.kubernetes.io/name: csi-sidecars
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: csi-sidecars-cfg
+subjects:
+- kind: ServiceAccount
+  name: csi-sidecars
+  namespace: default

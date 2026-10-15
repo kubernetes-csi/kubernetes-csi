@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "attacher": {
+      "commit": "f395fb4ff4d3fb41d2e2dfde0f8373d9e7162aeb",
+      "ref": "refs/heads/release-4.12",
+      "repository": "https://github.com/kubernetes-csi/external-attacher"
+    },
+    "csi-lib-utils": {
+      "commit": "a83815b94f6ead7ac9946fd5cde3fd2025dd4e8e",
+      "ref": "refs/heads/master",
+      "repository": "https://github.com/kubernetes-csi/csi-lib-utils"
+    },
+    "provisioner": {
+      "commit": "7920776148e280736afde6f289e8b0d2afb0b469",
+      "ref": "refs/heads/master",
+      "repository": "https://github.com/kubernetes-csi/external-provisioner"
+    },
+    "resizer": {
+      "commit": "2a1fee85c0e8c8ce571a89adba63613936faec03",
+      "ref": "refs/heads/master",
+      "repository": "https://github.com/kubernetes-csi/external-resizer"
+    },
+    "snapshotter": {
+      "commit": "afb2f0d85e00e40cda621549d56fda11ccd3558b",
+      "ref": "refs/heads/master",
+      "repository": "https://github.com/kubernetes-csi/external-snapshotter"
+    }
+  }
+}

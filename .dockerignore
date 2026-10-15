@@ -1,0 +1,6 @@
+# Images package prebuilt binaries; source, caches and local settings stay out.
+**
+!Dockerfile
+!bin/**
+!cmd/snapshot-controller/Dockerfile
+!cmd/snapshot-conversion-webhook/Dockerfile

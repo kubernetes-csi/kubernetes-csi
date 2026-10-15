@@ -1,0 +1,23 @@
+{
+  "kubernetes_tests": {
+    "1.31.9": {
+      "kind_version": "v0.28.0",
+      "node": {
+        "image": "docker.io/kindest/node:v1.31.9@sha256:156da58ab617d0cb4f56bbdb4b493f4dc89725505347a4babde9e9544888bb92",
+        "platforms": {
+          "linux/amd64": "sha256:1bb652e749c14f717721c0e33be9642c69200a979940a596036fbbeb43a846bf",
+          "linux/arm64": "sha256:3e1334676da5a641e435cf5a757e51bb572365204d532a3fa20637d50ba88329"
+        }
+      },
+      "purpose": "legacy-regression"
+    }
+  },
+  "runtime": {
+    "image": "gcr.io/distroless/static@sha256:58133991db06659feaabe0f4e97a35cebf15ef4ea08f8a4c6d2ee5f75e4aa6a0",
+    "platforms": {
+      "linux/amd64": "sha256:a8a6666cb7b13df7d18fd65b4264c2edafbce92acc0f32c423b5470d7d717665",
+      "linux/arm64": "sha256:63c8322db7adc53a501d276c2c3285e41fb9a9628d01809dfa60e1c925b3cf38"
+    }
+  },
+  "schema_version": 1
+}

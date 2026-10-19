@@ -1,0 +1,1 @@
+../../../../tools/pkg/attacher/cmd/csi-attacher/main.go

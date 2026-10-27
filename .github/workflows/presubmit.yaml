@@ -4,10 +4,8 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-  # The hostpath Prow suite is a full kind-based e2e run; it is expensive to run
-  # on every pull request. Run it on a weekly schedule (Mondays 06:00 UTC) so
-  # regressions against the locked upstream sources are caught even when no PR
-  # touches the e2e path. The lint/build jobs still run on every push and PR.
+  # Run the full kind-based hostpath e2e suite on every pull request, with a
+  # weekly run (Mondays 06:00 UTC) for regressions outside PR changes.
   schedule:
     - cron: "0 6 * * 1"
 jobs:
@@ -41,45 +39,51 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
-    - name: preload locked Linux builder
-      run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
-    # Generates the assembly from the locked sources inside the locked builder and
-    # compiles it (sync.sh runs the maintained-package tests, `make build`, and
-    # --help smoke checks). The generated tree is build output and stays
-    # uncommitted, so every job assembles it first.
-    - name: locked assembly, build, and maintained-package checks
-      run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
+    - name: Read locked Go version
+      id: go
+      run: echo "version=$(python3 -B tools/scripts/ci.py go-version)" >> "$GITHUB_OUTPUT"
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ steps.go.outputs.version }}
+        cache: false
+    - name: test assembled code and entrypoints
+      run: make test-go test-vet test-fmt verify-entrypoints
 
   e2e-hostpath:
-    # Full kind-based e2e: run weekly (schedule) and on demand (workflow_dispatch),
-    # not on every pull request. Pass the PR/push PR number via a comment-trigger
-    # or manual dispatch when an on-demand e2e run is needed.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # PRs must pass the full hostpath suite before merge. Preserve scheduled
+    # and manual runs without adding a duplicate run for pushes to main.
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: [ubuntu-latest]
     permissions:
       contents: read
-    strategy:
-      matrix:
-        go: ["1.26.6"]
+    env:
+      ARTIFACTS: ${{ github.workspace }}/artifacts/e2e
     steps:
     - uses: actions/checkout@a5ac7e51b41094c92402da3b24376905380afc29 # v4.1.6
       with:
         fetch-depth: 0
+    - name: Read locked Go version
+      id: go
+      run: echo "version=$(python3 -B tools/scripts/ci.py go-version)" >> "$GITHUB_OUTPUT"
     - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
-        go-version: ${{ matrix.go }}
+        go-version: ${{ steps.go.outputs.version }}
+        cache: false
     - run: |
         echo "GOPATH=$(go env GOPATH)" >> $GITHUB_ENV
     - run: go version
-    # sync.sh only runs inside the locked builder (it requires the builder
-    # identity and exact locked tool versions); the container mounts this
-    # workspace, so the generated tree stays for the Prow e2e run below.
-    - name: preload locked Linux builder
-      run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
-    - name: locked assembly into the workspace
-      run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
     - name: run hostpath Prow suite
       run: |
         set -o pipefail
         ./.prow.sh 2>&1 | tee .prow.sh.log
     - run: grep "Ginkgo ran" -B 4 .prow.sh.log
+    - name: upload e2e reports and source lock
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: hostpath-e2e-${{ github.sha }}
+        path: |
+          .prow.sh.log
+          artifacts/e2e/
+          tools/assembly/sources.lock.json
+        include-hidden-files: true

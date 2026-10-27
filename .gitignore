@@ -1,9 +1,5 @@
-# Assembly output produced by tools/scripts/sync.sh
-/pkg/
-/cmd/
-/vendor/
-/go.mod
-/go.sum
+# Generated source snapshots (cmd/, pkg/, vendor/, go.mod/go.sum) are tracked.
+# Local assembly intermediates and compiled binaries stay uncommitted.
 # Legacy library/workspace output: no longer generated, still cleaned up.
 /staging/
 /go.work

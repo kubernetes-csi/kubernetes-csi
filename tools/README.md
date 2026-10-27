@@ -4,11 +4,12 @@ This directory is the **source of truth** maintained by developers. See the
 repository-root [CODE_LAYOUT.md](../CODE_LAYOUT.md) for how this layer relates
 to the generated assembly area.
 
-The assembly area (`cmd/`, `pkg/`, `go.mod`, `vendor/`)
+The assembly area (`cmd/`, `pkg/`, `go.mod`, `go.sum`, `vendor/`)
 is produced by `scripts/sync.sh` from the locked upstream revisions and is
-**not committed** — `.gitignore` excludes it as build output. A fresh checkout
-runs sync once inside the locked builder, then builds with a plain `go build`;
-sync is not a step of every build.
+**committed in a separate generated-source commit**. A fresh checkout can build
+directly with a plain `go build`. CI builds and tests this committed assembly
+without running the sync script. Keep maintained-code changes in another
+commit; `bin/`, `tmp/`, and bootstrap environments remain uncommitted.
 
 ## Contents
 
@@ -51,6 +52,7 @@ for how these layers reinforce each other.
 | `scripts/sync.sh` | Top-level sync entrypoint: clones upstream `external-*`, rewrites imports, generates the root `go.mod`, and runs module-mode tidy/vendor. |
 | `scripts/cleanup.sh` | Removes generated artifacts and `.assembly-env` (leaves `tools/` untouched). |
 | `scripts/isolated_sync.py` | Runs `sync.sh` (or tooling checks) inside the locked Linux builder with the checkout mounted, regenerating the assembly area in place. |
+| `scripts/ci.py` | Reads the locked Go version for CI and, in Cloud Build, verifies the build environment and Dockerfiles before writing a version handoff. |
 | `scripts/assembly_sources.py` | Source-lock validation and exact single-commit checkout of each upstream input. |
 | `scripts/assembly_dependencies.py` | Generates the root `go.mod`, aligns the Kubernetes family, and resolves csi-lib-utils to its locked module revision. |
 | `scripts/build_environment.py` | Locked builder-image selection, tool preflight, and fresh hash-verified Python bootstrap. |
@@ -90,7 +92,8 @@ instead. The container mounts the checkout, so the tree is regenerated in
 place: preflight verifies any existing outputs are disposable and `sync.sh`
 removes them before assembling. `--tooling-only`
 runs the tooling tests, gofmt, and license checks without assembling.
-`make sync KUBERNETES=1.MINOR.PATCH` and `make clean` wrap the root scripts.
+`make sync KUBERNETES=1.MINOR.PATCH` wraps `sync.sh`;
+`make clean-generated` wraps `cleanup.sh`. `make clean` removes only `bin/`.
 Both `sync.sh` and `cleanup.sh` can be started from any directory: they resolve
 the repository root from their own location and always operate on it.
 
@@ -125,8 +128,8 @@ leaves those outputs intact.
 any old environment, creates a fresh one, and cleans it on success, ordinary
 failure, or a handled termination signal. If an uncatchable termination leaves a
 partial environment, the next session removes it before trying again.
-`make clean` also removes it. Repeating tooling checks, or running sync after
-tooling checks, does not require manual environment deletion.
+`make clean-generated` also removes it. Repeating tooling checks, or running
+sync after tooling checks, does not require manual environment deletion.
 
 ## Validation strategy
 
@@ -221,11 +224,12 @@ build step is required.
 make verify-entrypoints
 ```
 
-After sync, this target runs the AIO and individual attacher package tests,
-then builds native `csi-sidecars` and `csi-attacher` binaries in a temporary
-directory. It checks all eight attacher flags through both CLIs, `--help`, and
-version stamping. `sync.sh` runs this target automatically; individual attacher
-is a compatibility entrypoint, not an additional release image.
+Against the committed assembly, this target runs the AIO and individual
+attacher package tests, then builds native `csi-sidecars` and `csi-attacher`
+binaries in a temporary directory. It checks all eight attacher flags through
+both CLIs, plus `--help` and version stamping. `sync.sh` runs this target
+automatically; the individual attacher is a compatibility entrypoint, not an
+additional release image.
 
 The entrypoints share attacher configuration registration and assembled library
 packages, but retain separate startup implementations. AIO uses

@@ -184,10 +184,11 @@ class ImageInputTests(unittest.TestCase):
                 lock = fixture(root)
                 scripts = root / "tools/scripts"
                 scripts.mkdir()
-                for name in ("image_inputs.py", "assembly_sources.py"):
+                for name in ("image_inputs.py", "assembly_sources.py", "build_environment.py", "ci.py"):
                     shutil.copy2(images.ROOT / "tools/scripts" / name, scripts / name)
+                shutil.copy2(images.ROOT / "tools/assembly/build-environment.lock.json",
+                             root / "tools/assembly/build-environment.lock.json")
                 shutil.copy2(images.ROOT / ".prow.sh", root / ".prow.sh")
-                (root / "go.mod").write_text("module example.org/fixture\ngo 1.26.0\n")
                 go = scripts / "go"
                 go.write_text('#!/bin/sh\necho "unexpected Go operation in Prow setup" >&2\nexit 86\n')
                 go.chmod(0o755)

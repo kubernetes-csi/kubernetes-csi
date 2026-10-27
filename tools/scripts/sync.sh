@@ -192,6 +192,11 @@ commit.message = new_message.encode()
       ${TRASH} pkg/${SIDECAR}/CHANGELOG
       ${TRASH} pkg/${SIDECAR}/examples
       ${TRASH} pkg/${SIDECAR}/deploy
+      # E2E installs these locked snapshot-controller manifests from the
+      # committed assembly instead of fetching them during CI.
+      mkdir -p "pkg/${SIDECAR}/deploy/kubernetes/snapshot-controller"
+      cp "tmp/external-${SIDECAR}/pkg/${SIDECAR}/deploy/kubernetes/snapshot-controller/"{rbac-snapshot-controller,setup-snapshot-controller}.yaml \
+        "pkg/${SIDECAR}/deploy/kubernetes/snapshot-controller/"
       ${TRASH} pkg/${SIDECAR}/hack
       # snapshot-conversion-webhook is kept as an independent binary in cmd/snapshot-conversion-webhook
       # ${TRASH} pkg/${SIDECAR}/cmd/snapshot-conversion-webhook
@@ -392,6 +397,10 @@ symlink_from_root_to_tools tools/pkg/attacher/cmd/csi-attacher/config/flags_test
 python3 -B tools/scripts/assembly_dependencies.py seed --kubernetes "${UPDATE_KUBERNETES}"
 retry_go_dependencies go mod tidy
 retry_go_dependencies go mod vendor
+# Upstream ownership metadata belongs to the source repositories. If copied
+# into this repository, Prow treats it as local review policy and may reject
+# users who are valid only in those upstream repositories.
+find pkg -type f \( -name OWNERS -o -name OWNERS_ALIASES \) -delete
 export GOFLAGS="-mod=vendor"
 
 # checkpoint: test configuration and build/smoke-check both AIO and individual

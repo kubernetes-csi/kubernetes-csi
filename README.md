@@ -20,9 +20,9 @@ production readiness for the combined process.
 
 Coordinated lifecycle management, shared diagnostics endpoints, complete
 multi-controller in-cluster coverage, and the final release pipeline remain in
-progress. Generated assembly sources are not yet committed; a fresh checkout
-currently requires sync before building. See the development guide for the
-current workflow.
+progress. Generated assembly sources and vendored dependencies are committed as
+a separate snapshot. A fresh checkout and CI build and test that committed
+snapshot directly. See the development guide for the current workflow.
 
 ## Documentation
 

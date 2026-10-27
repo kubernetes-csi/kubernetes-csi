@@ -35,9 +35,7 @@ sync:
 	@test -n '$(KUBERNETES)' || { echo 'Usage: make sync KUBERNETES=1.MINOR.PATCH'; exit 1; }
 	./tools/scripts/sync.sh --update-dependencies '$(KUBERNETES)'
 
-# Extend release-tools' `clean` (which only removes bin/) so it also removes
-# the generated assembly area; cleanup.sh leaves tools/ untouched.
+# Remove the generated assembly only when explicitly requested.
 .PHONY: clean-generated
-clean: clean-generated
 clean-generated:
 	./tools/scripts/cleanup.sh

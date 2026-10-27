@@ -78,11 +78,10 @@ AIO controllers. Upstream images can be redirected using the registry/tag
 variables documented in `deploy.sh`; these overrides do not change RBAC.
 
 The cluster-wide snapshot-controller is separate from the AIO sidecars and this
-shared RBAC. The inherited Prow harness still installs its RBAC, CRDs, and
-Deployment from `CSI_SNAPSHOTTER_VERSION`, read from the source lock by
-`.prow.sh`. `deploy.sh` retargets that Deployment to `snapshot-controller:csiprow`
-when it exists, so e2e tests use the locally built binary. That upstream
-installation flow is unchanged.
+shared RBAC. `.prow.sh` installs its CRDs, RBAC, and Deployment from the
+committed `pkg/snapshotter/` snapshot, using the locally built
+`snapshot-controller:csiprow` image. When the Deployment exists, `deploy.sh`
+confirms that image and waits for its rollout before the e2e tests.
 
 The versioned hostpath manifests are an e2e fixture, not a production deployment.
 

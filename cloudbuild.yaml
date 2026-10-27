@@ -1,0 +1,27 @@
+# Validate the locked builder and Dockerfiles before publishing from /workspace.
+timeout: 7200s
+options:
+  substitutionOption: ALLOW_LOOSE
+steps:
+  - id: verify-source
+    # Must match tools/assembly/build-environment.lock.json (checked by tests
+    # and runtime preflight). Do not substitute a moving builder tag.
+    name: docker.io/library/golang@sha256:23fdfd3a6abc97c81e32a724cdd1cf541c06c416eb04d717815f4ed7c75623d0
+    entrypoint: python3
+    args: ['-B', 'tools/scripts/ci.py', 'prepare-cloud']
+    env:
+      - CSI_AIO_BUILDER_IMAGE=docker.io/library/golang@sha256:23fdfd3a6abc97c81e32a724cdd1cf541c06c416eb04d717815f4ed7c75623d0
+      - GOTOOLCHAIN=local
+  - id: publish
+    waitFor: ['verify-source']
+    name: gcr.io/k8s-staging-test-infra/gcb-docker-gcloud:v20260205-38cfa9523f
+    entrypoint: ./.cloudbuild.sh
+    env:
+      - GIT_TAG=${_GIT_TAG}
+      - PULL_BASE_REF=${_PULL_BASE_REF}
+      - REGISTRY_NAME=gcr.io/${_STAGING_PROJECT}
+      - HOME=/root
+substitutions:
+  _GIT_TAG: '12345'
+  _PULL_BASE_REF: 'main'
+  _STAGING_PROJECT: 'k8s-staging-sig-storage'

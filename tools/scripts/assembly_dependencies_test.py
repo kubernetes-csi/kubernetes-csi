@@ -88,6 +88,10 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(script.count("retry_go_dependencies go mod tidy"), 1)
         self.assertEqual(script.count("retry_go_dependencies go mod vendor"), 1)
+        ownership_cleanup = "find pkg -type f \\( -name OWNERS -o -name OWNERS_ALIASES \\) -delete"
+        self.assertIn(ownership_cleanup, script)
+        self.assertLess(script.index("retry_go_dependencies go mod vendor"),
+                        script.index(ownership_cleanup))
         self.assertNotIn("go work", script)
         self.assertNotIn('export GOWORK="${REPO_ROOT}/go.work"', script)
         # The committed generated tree is removed (after preflight) before any

@@ -3,26 +3,18 @@
 ## Build on x86_64 Linux
 
 Run commands from the repository root on an x86_64 Linux host. Install Git,
-Python 3, and Docker, and ensure the current user can access the Docker engine.
-Assembly needs network access to source repositories, Go dependencies, the locked
-builder image, and Python wheels.
+Python 3, Go 1.26.6, and Make. Docker is needed for container images and E2E.
 
-A fresh checkout currently requires assembly before building:
-
-```bash
-docker pull "$(python3 -B tools/scripts/build_environment.py image --arch amd64)"
-python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
-```
-
-Assembly runs in the locked Linux builder and builds the release binaries.
-To rebuild an assembled checkout, install Go 1.26.6 and Make on the host:
+A fresh checkout includes the generated sources and vendored dependencies.
+Build the project directly from the checkout:
 
 ```bash
 make build BUILD_PLATFORMS="linux amd64"
 ```
 
-Run only one assembly, tooling check, or cleanup at a time in a checkout.
-See [Assembly tools](tools/README.md) for source locks and assembly details.
+For intentional snapshot updates, see [Assembly tools](tools/README.md). Commit
+`cmd/`, `pkg/`, `vendor/`, `go.mod`, and `go.sum` in a dedicated generated-source
+commit, separate from maintained-code, CI, and documentation changes.
 
 ## Use the build outputs
 
@@ -78,20 +70,19 @@ installation.
 ## Change maintained sources
 
 Edit entrypoints, configuration, assembly scripts, and locks under `tools/`,
-not generated `cmd/`, `pkg/`, Go module metadata, or `vendor/`. Regenerate after
-source changes. Review `deploy/rbac.yaml` alongside upstream controller updates;
-assembly does not generate RBAC. See [Code layout](CODE_LAYOUT.md) for ownership
-boundaries.
+not generated `cmd/`, `pkg/`, Go module metadata, or `vendor/`. Build and test
+maintained entrypoint changes directly from the checkout. Only regenerate the
+snapshot when changing locked upstream sources or assembly output rules. Review
+the maintained hostpath `deploy/rbac.yaml` alongside upstream controller updates.
+See [Code layout](CODE_LAYOUT.md) for ownership boundaries.
 
 ## Validate changes
 
-Check tooling without regenerating sources:
+CI jobs build and test the generated sources already in the checkout. Normal
+`make build` and direct `.prow.sh` invocations use those local files.
 
-```bash
-python3 -B tools/scripts/isolated_sync.py --engine docker --tooling-only
-```
-
-After assembly, check CLI compatibility and the locally built images:
+After building the binaries and local images, check CLI compatibility and image
+contents:
 
 ```bash
 make verify-entrypoints
@@ -114,9 +105,35 @@ set -o pipefail
 ./.prow.sh 2>&1 | tee .prow.sh.log
 ```
 
-Prow builds and tests the code, builds local images, deploys hostpath, and runs
-CSI sanity and parallel/serial storage E2E suites without publishing images.
+Prow builds and tests the code, installs the committed snapshot-controller
+manifests with its local image, deploys hostpath, and runs CSI sanity and
+parallel/serial storage E2E suites without publishing images.
 Inspect the exit status, suite results, and reports under `ARTIFACTS` (by default
 under `CSI_PROW_WORK`). Kubernetes 1.31.9 hostpath is a legacy regression target,
 not a production support matrix. See
 [Validation strategy](tools/README.md#validation-strategy) for the individual gates.
+
+## CI and Cloud Build
+
+The build, hostpath e2e, and image-security jobs select Go from the builder lock
+and build or test the checkout directly. They never
+run the upstream sync script. Tooling and spelling jobs inspect maintained
+inputs. The legacy hostpath cluster version remains a separate test input.
+Hostpath runs on every pull request, weekly, or through manual dispatch. It
+uploads logs, JUnit reports, and the source lock even when tests fail.
+
+The root `cloudbuild.yaml` first validates the locked Linux amd64 builder and
+Dockerfiles, then records the Go version. The next step uses the same checkout
+in Cloud Build's shared `/workspace` and invokes `.cloudbuild.sh`. The publishing
+wrapper requires the Go-version handoff and passes that version to release-tools,
+which builds all three commands for Linux amd64/arm64 and publishes their images.
+The builder digest in the YAML must match the build-environment lock; a tooling
+test and runtime preflight enforce this.
+
+Cloud Build uses the files supplied by its source trigger without fetching
+upstream controller repositories or restoring Git metadata. Configure the trusted
+postsubmit/tag job to use the root config and provide `_GIT_TAG`,
+`_PULL_BASE_REF`, and `_STAGING_PROJECT` using the existing release-tools
+conventions. This config publishes images; ordinary pull-request validation uses
+the Actions build/image jobs without publishing. Trigger and service-account
+configuration are managed outside this repository.

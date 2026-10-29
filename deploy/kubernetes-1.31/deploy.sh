@@ -124,12 +124,9 @@ for i in $(ls ${BASE_DIR}/hostpath/*.yaml | sort); do
     fi
 done
 
-# Prow installs snapshot-controller from the upstream manifests before this script
-# runs, so the Deployment is already there with an upstream release image. Retarget
-# it to the image this repository builds, so the e2e suite exercises our
-# snapshot-controller together with the snapshotter inside the AIO image. Prow has
-# already loaded snapshot-controller:csiprow into the cluster at this point.
-# Outside Prow there is no such Deployment and the upstream one is left alone.
+# Prow installs the committed snapshot-controller manifest with the locally
+# built image before this script runs. Ensure that image completes its rollout
+# before starting e2e tests. Outside Prow there is no such Deployment.
 if kubectl -n kube-system get deployment/snapshot-controller >/dev/null 2>&1; then
     echo "using the locally built snapshot-controller"
     run kubectl -n kube-system set image deployment/snapshot-controller '*=snapshot-controller:csiprow'

@@ -1,0 +1,1 @@
+../../tools/cmd/csi-sidecars/main_test.go

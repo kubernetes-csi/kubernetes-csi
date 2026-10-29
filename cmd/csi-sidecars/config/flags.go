@@ -1,0 +1,1 @@
+../../../tools/cmd/csi-sidecars/config/flags.go

@@ -25,34 +25,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
-      - name: Parse go version from .prow.sh
-        id: go-version
-        run: |
-          GO_VERSION=$(sed -n -E 's/^export CSI_PROW_GO_VERSION_BUILD="?([0-9.]+)"?.*$/\1/p' .prow.sh)
-          if [ -z "$GO_VERSION" ]; then
-            echo "CSI_PROW_GO_VERSION_BUILD not found in .prow.sh" >&2
-            exit 1
-          fi
-          echo "Using go: $GO_VERSION"
-          echo "go=$GO_VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Install go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Read locked Go version
+        id: go
+        run: echo "version=$(python3 -B tools/scripts/ci.py go-version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ steps.go-version.outputs.go }}
-
-      - name: Preload locked Linux builder
-        run: docker pull "$(python3 -B tools/scripts/build_environment.py image)"
-
-      # sync.sh only runs inside the locked builder (it requires the builder
-      # identity and exact locked tool versions); the container mounts this
-      # workspace, so the generated tree stays for `make container` below.
-      - name: Sync the assembly area from upstream kubernetes-csi repositories
-        run: python3 -B tools/scripts/isolated_sync.py --engine docker --update-dependencies 1.36.3
-
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: Build images from Dockerfile
         # `make container` builds every cmd in the Makefile's CMDS list
-        # (kept current by sync.sh); the scans below stay in one job so they
+        # (kept current by the committed snapshot); the scans stay in one job so they
         # share the Trivy DB downloaded by the first scan.
         run: make container
 
@@ -64,8 +46,8 @@ jobs:
 
       - name: Run Trivy vulnerability scanner on csi-sidecars image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        env:
-          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
+        # Keep Trivy's default mirror.gcr.io / ghcr.io fallback. A single ECR
+        # override made database throttling fail an otherwise successful build.
         with:
           image-ref: 'csi-sidecars:latest'
           format: 'table'
@@ -76,8 +58,6 @@ jobs:
 
       - name: Run Trivy vulnerability scanner on snapshot-controller image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        env:
-          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
         with:
           image-ref: 'snapshot-controller:latest'
           format: 'table'
@@ -88,8 +68,6 @@ jobs:
 
       - name: Run Trivy vulnerability scanner on snapshot-conversion-webhook image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        env:
-          TRIVY_DB_REPOSITORY: "public.ecr.aws/aquasecurity/trivy-db:2"
         with:
           image-ref: 'snapshot-conversion-webhook:latest'
           format: 'table'
@@ -124,12 +102,12 @@ jobs:
 
       - name: Collect and validate supply-chain metadata
         run: |
-          cp tmp/source-provenance.json artifacts/metadata/source-provenance.json
+          cp tools/assembly/sources.lock.json artifacts/metadata/sources.lock.json
           for file in \
             artifacts/metadata/csi-sidecars.spdx.json \
             artifacts/metadata/snapshot-controller.spdx.json \
             artifacts/metadata/snapshot-conversion-webhook.spdx.json \
-            artifacts/metadata/source-provenance.json; do
+            artifacts/metadata/sources.lock.json; do
             test -s "$file"
           done
 

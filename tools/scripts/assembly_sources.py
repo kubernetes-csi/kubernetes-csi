@@ -81,8 +81,8 @@ def encoded(lock):
     return (json.dumps(validate(lock), indent=2, sort_keys=True) + "\n").encode()
 
 
-def git(*args, cwd=None):
-    return subprocess.check_output(["git", *args], cwd=cwd, text=True, timeout=300).strip()
+def git(*args, cwd=None, timeout=300):
+    return subprocess.check_output(["git", *args], cwd=cwd, text=True, timeout=timeout).strip()
 
 
 def ignored(root, name):
@@ -132,7 +132,10 @@ def checkout(lock, name, destination):
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"{name}: refusing to reuse checkout {destination}")
     git("init", str(destination))
-    git("fetch", "--no-tags", source["repository"], source["commit"], cwd=destination)
+    # Fetching an exact commit may transfer repository history; allow slow links
+    # more time without relaxing timeouts on local Git operations.
+    git("fetch", "--no-tags", source["repository"], source["commit"],
+        cwd=destination, timeout=1200)
     actual = git("rev-parse", "--verify", "FETCH_HEAD^{commit}", cwd=destination)
     if actual != source["commit"]:
         raise ValueError(f"{name}: fetched {actual}, expected {source['commit']}")

@@ -35,7 +35,6 @@ import (
 
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/controller"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/features"
@@ -46,7 +45,6 @@ import (
 	csitrans "k8s.io/csi-translation-lib"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
@@ -219,7 +217,7 @@ func resizer_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx)
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -254,7 +252,7 @@ func resizer_main(ctx context.Context) {
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
+	runWithLeaderElection(
 		ctx,
 		config,
 		standardflags.Configuration,

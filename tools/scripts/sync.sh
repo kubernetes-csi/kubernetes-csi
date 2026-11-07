@@ -263,6 +263,12 @@ commit.message = new_message.encode()
     # Standalone var version (outside var() blocks) conflicts with main.go
     sed -i '/^var version/d' "${NEW_FILE}"
 
+    # AIO owns process signals and leader-election shutdown for all controllers.
+    sed -i '/k8s.io\/apiserver\/pkg\/server"/d' "${NEW_FILE}"
+    sed -i '/github.com\/kubernetes-csi\/csi-lib-utils\/leaderelection"/d' "${NEW_FILE}"
+    sed -i 's/server.SetupSignalHandler()/processShutdown/g' "${NEW_FILE}"
+    sed -i 's/leaderelection.RunWithLeaderElection(/runWithLeaderElection(/g' "${NEW_FILE}"
+
     # Dead imports
     sed -i '/goflag/d' "${NEW_FILE}"
     sed -i '/flag"/d' "${NEW_FILE}"
@@ -308,17 +314,32 @@ commit.message = new_message.encode()
       sed -i 's/standardflags\.Configuration\.MetricsPath/*metricsPath/g' "${NEW_FILE}"
       # Remove only the standardflags.RegisterCommonFlags import alias line if present,
       # but keep the standardflags package import and bare standardflags.Configuration
-      # usages (passed to libconfig.BuildConfig and leaderelection.RunWithLeaderElection).
+      # usages (passed to libconfig.BuildConfig and runWithLeaderElection).
       # The field accesses (e.g. standardflags.Configuration.ShowVersion) were already
       # replaced with global vars above.
     fi
     if [ "${SIDECAR}" = "provisioner" ]; then
       # Remove pre-Go 1.21 max() helper that shadows the builtin
       sed -i '/^\/\/ max returns/,/^}/d' "${NEW_FILE}"
+      if [[ $(basename "${FILE}") == csi-provisioner.go ]]; then
+        # During shutdown, cache synchronization must follow the controller's
+        # context so a pending sync cannot hold the leader lease open. Keep
+        # the informers' original stop channel until the workers have drained.
+        sed -i '/^\trun := func(ctx context.Context) {$/a\
+        cacheSyncCtx := ctx\
+        if utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit) {\
+            cacheSyncCtx = controllerCtx\
+        }' "${NEW_FILE}"
+        sed -i 's/WaitForCacheSync(ctx.Done())/WaitForCacheSync(cacheSyncCtx.Done())/g' "${NEW_FILE}"
+        sed -i '/if !v {/a\
+                if cacheSyncCtx.Err() != nil {\
+                    return\
+                }' "${NEW_FILE}"
+      fi
     fi
     if [ "${SIDECAR}" = "snapshotter" ]; then
       # NOTE: unlike other sidecars, do NOT remove strings import for snapshotter
-      # because it's used in the leaderelection.RunWithLeaderElection call
+      # because it's used in the runWithLeaderElection call
       # Restore the prefix var that was inside var(...) block (stripped by sed)
       sed -i '/^func snapshotter_main/i\var snapshotterPrefix = "external-snapshotter-leader"' "${NEW_FILE}"
       sed -i 's/\bprefix\b/snapshotterPrefix/g' "${NEW_FILE}"
@@ -328,6 +349,12 @@ commit.message = new_message.encode()
       sed -i 's/\benableNodeDeployment\b/snapshotterEnableNodeDeployment/g' "${NEW_FILE}"
       sed -i 's/\bcsiTimeout\b/snapshotterCSITimeout/g' "${NEW_FILE}"
       sed -i 's/\bbuildConfig\b/snapshotterBuildConfig/g' "${NEW_FILE}"
+      # Snapshotter's standalone entrypoint waits only for SIGINT. In AIO it
+      # must stop on the shared context, including SIGTERM and peer failures.
+      sed -i '/"os\/signal"/d' "${NEW_FILE}"
+      sed -i '/go ctrl.Run(\*snapshotterThreads, stopCh, \&controllerWg)/{n;s/<-shutdownHandler/<-controllerCtx.Done()/;}' "${NEW_FILE}"
+      sed -i '/c := make(chan os.Signal, 1)/,+2c\            <-ctx.Done()' "${NEW_FILE}"
+      sed -i 's/\.\.\.until SIGINT/...until context cancellation/' "${NEW_FILE}"
     fi
 
     add_generation_marker "${NEW_FILE}" "external-${SIDECAR}"
@@ -383,6 +410,9 @@ find cmd pkg -type f -name '*.go' -print0 | xargs -0 gofmt -w
 symlink_from_root_to_tools tools/cmd/csi-sidecars/main.go
 # Tooling tests for the AIO entrypoint (parseControllers, config->global mapping).
 symlink_from_root_to_tools tools/cmd/csi-sidecars/main_test.go
+# AIO-specific leader-election lifecycle, shared by the generated controllers.
+symlink_from_root_to_tools tools/cmd/csi-sidecars/leader_election.go
+symlink_from_root_to_tools tools/cmd/csi-sidecars/leader_election_test.go
 # The utility global function to register common and per-sidecar flags.
 symlink_from_root_to_tools tools/cmd/csi-sidecars/config/flags.go
 # Tooling tests for the AIO flag registration.

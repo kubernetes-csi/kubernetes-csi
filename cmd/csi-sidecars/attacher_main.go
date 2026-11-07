@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -41,7 +40,6 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	libconfig "github.com/kubernetes-csi/csi-lib-utils/config"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	"github.com/kubernetes-csi/csi-lib-utils/rpc"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
@@ -248,7 +246,7 @@ func attacher_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx) // shuts down the whole process, incl. leader election
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -273,7 +271,7 @@ func attacher_main(ctx context.Context) {
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
+	runWithLeaderElection(
 		ctx,
 		config,
 		standardflags.Configuration,

@@ -40,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
-	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -57,7 +56,6 @@ import (
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 	libmetrics "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller/metrics"
 
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/provisioner/pkg/capacity"
@@ -557,7 +555,7 @@ func provisioner_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx)
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -569,6 +567,10 @@ func provisioner_main(ctx context.Context) {
 	}
 
 	run := func(ctx context.Context) {
+		cacheSyncCtx := ctx
+		if utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit) {
+			cacheSyncCtx = controllerCtx
+		}
 
 		factory.Start(ctx.Done())
 		if factoryForNamespace != nil {
@@ -579,9 +581,12 @@ func provisioner_main(ctx context.Context) {
 		if topologyInformer != nil {
 			go topologyInformer.RunWorker(ctx)
 		}
-		cacheSyncResult := factory.WaitForCacheSync(ctx.Done())
+		cacheSyncResult := factory.WaitForCacheSync(cacheSyncCtx.Done())
 		for _, v := range cacheSyncResult {
 			if !v {
+				if cacheSyncCtx.Err() != nil {
+					return
+				}
 				klog.Fatalf("Failed to sync Informers!")
 			}
 		}
@@ -590,9 +595,12 @@ func provisioner_main(ctx context.Context) {
 			if gatewayFactory != nil {
 				gatewayFactory.Start(ctx.Done())
 			}
-			gatewayCacheSyncResult := gatewayFactory.WaitForCacheSync(ctx.Done())
+			gatewayCacheSyncResult := gatewayFactory.WaitForCacheSync(cacheSyncCtx.Done())
 			for _, v := range gatewayCacheSyncResult {
 				if !v {
+					if cacheSyncCtx.Err() != nil {
+						return
+					}
 					klog.Fatalf("Failed to sync Informers for gateway!")
 				}
 			}
@@ -639,7 +647,7 @@ func provisioner_main(ctx context.Context) {
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
+	runWithLeaderElection(
 		ctx,
 		config,
 		standardflags.Configuration,

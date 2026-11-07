@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +32,6 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
@@ -46,7 +44,6 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	libconfig "github.com/kubernetes-csi/csi-lib-utils/config"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	csirpc "github.com/kubernetes-csi/csi-lib-utils/rpc"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
@@ -287,7 +284,7 @@ func snapshotter_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx)
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -307,7 +304,7 @@ func snapshotter_main(ctx context.Context) {
 			coreFactory.Start(stopCh)
 			var controllerWg sync.WaitGroup
 			go ctrl.Run(*snapshotterThreads, stopCh, &controllerWg)
-			<-shutdownHandler
+			<-controllerCtx.Done()
 			controllerWg.Wait()
 			terminate()
 		} else {
@@ -318,15 +315,13 @@ func snapshotter_main(ctx context.Context) {
 			coreFactory.Start(stopCh)
 			go ctrl.Run(*snapshotterThreads, stopCh, nil)
 
-			// ...until SIGINT
-			c := make(chan os.Signal, 1)
-			signal.Notify(c, os.Interrupt)
-			<-c
+			// ...until context cancellation
+			<-ctx.Done()
 			close(stopCh)
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
+	runWithLeaderElection(
 		ctx,
 		config,
 		standardflags.Configuration,

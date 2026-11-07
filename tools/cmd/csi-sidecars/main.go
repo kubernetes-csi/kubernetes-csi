@@ -23,14 +23,14 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/cmd/csi-sidecars/config"
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
 	flag "github.com/spf13/pflag"
+	"k8s.io/apiserver/pkg/server"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
@@ -115,8 +115,9 @@ var (
 	handleVolumeInUseError = flag.Bool("resizer-handle-volume-inuse-error", true, "Flag to turn on/off capability to handle volume in use error in resizer controller. Defaults to true if not set.")
 	extraModifyMetadata    = flag.Bool("resizer-extra-modify-metadata", false, "If set, add pv/pvc metadata to plugin modify requests as parameters.")
 
-	featureGates map[string]bool
-	version      = "unknown"
+	featureGates    map[string]bool
+	version         = "unknown"
+	processShutdown <-chan struct{}
 )
 
 // copyFlagsFromConfigToGlobalVars copies flags from standardflags.Configuration
@@ -267,39 +268,96 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	errs, ctx := errgroup.WithContext(context.Background())
-
 	controllersToEnable := parseControllers(config.Configuration.Controllers)
 	if err := validateControllers(controllersToEnable); err != nil {
 		klog.Fatal(err)
 	}
 
-	// TODO: Get main from each sidecar to return an error so we can handle it here
-	if _, ok := controllersToEnable["attacher"]; ok {
-		errs.Go(func() error {
-			attacher_main(ctx)
-			return fmt.Errorf("Attacher stopped")
-		})
+	signalShutdown := server.SetupSignalHandler()
+	shutdown := make(chan struct{})
+	processShutdown = shutdown
+	var shutdownOnce sync.Once
+	requestShutdown := func() {
+		shutdownOnce.Do(func() { close(shutdown) })
 	}
-	if _, ok := controllersToEnable["provisioner"]; ok {
-		errs.Go(func() error {
-			provisioner_main(ctx)
-			return fmt.Errorf("Provisioner stopped")
-		})
+	go func() {
+		<-signalShutdown
+		requestShutdown()
+	}()
+
+	runControllers := func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		controllerResults := make(chan error, len(controllersToEnable))
+		start := func(name string, run func(context.Context)) {
+			go func() {
+				if ctx.Err() == nil {
+					run(ctx)
+				}
+				controllerResults <- controllerStopped(name)
+			}()
+		}
+		stopWatching := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				requestShutdown()
+			case <-stopWatching:
+			}
+		}()
+
+		if _, ok := controllersToEnable["attacher"]; ok {
+			start("Attacher", attacher_main)
+		}
+		if _, ok := controllersToEnable["provisioner"]; ok {
+			start("Provisioner", provisioner_main)
+		}
+		if _, ok := controllersToEnable["resizer"]; ok {
+			start("Resizer", resizer_main)
+		}
+		if _, ok := controllersToEnable["snapshotter"]; ok {
+			start("Snapshotter", snapshotter_main)
+		}
+		// Wait for running controllers to drain. Initializing controllers cannot
+		// enter leader election after shutdown and must not delay process exit.
+		err := waitForControllers(processShutdown, controllerResults, requestShutdown, &controllersInElection)
+		close(stopWatching)
+		return err
 	}
-	if _, ok := controllersToEnable["resizer"]; ok {
-		errs.Go(func() error {
-			resizer_main(ctx)
-			return fmt.Errorf("Resizer stopped")
-		})
+
+	if err := runControllers(context.Background()); err != nil {
+		klog.Fatal(err)
 	}
-	if _, ok := controllersToEnable["snapshotter"]; ok {
-		errs.Go(func() error {
-			snapshotter_main(ctx)
-			return fmt.Errorf("Snapshotter stopped")
-		})
+}
+
+func waitForControllers(shutdown <-chan struct{}, results <-chan error, requestShutdown func(), active *controllerLifecycle) error {
+	var exitError error
+	select {
+	case <-shutdown:
+	case exitError = <-results:
+		if exitError != nil {
+			requestShutdown()
+		}
 	}
-	if err := errs.Wait(); err != nil {
-		panic(err)
+	active.wait()
+	for {
+		select {
+		case err := <-results:
+			if exitError == nil {
+				exitError = err
+			}
+		default:
+			return exitError
+		}
+	}
+}
+
+func controllerStopped(name string) error {
+	select {
+	case <-processShutdown:
+		return nil
+	default:
+		return fmt.Errorf("%s stopped", name)
 	}
 }

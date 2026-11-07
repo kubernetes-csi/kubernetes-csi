@@ -17,15 +17,163 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	goflag "flag"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-csi/csi-sidecars/cmd/csi-sidecars/config"
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
+
+type notReadyDriver struct {
+	csi.UnimplementedIdentityServer
+	probed chan struct{}
+}
+
+func (driver *notReadyDriver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	select {
+	case driver.probed <- struct{}{}:
+	default:
+	}
+	return &csi.ProbeResponse{Ready: wrapperspb.Bool(false)}, nil
+}
+
+func TestSignalDuringControllerStartup(t *testing.T) {
+	if os.Getenv("CSI_AIO_TEST_CHILD") == "1" {
+		os.Args = []string{"csi-sidecars", "--controllers=attacher", "--kubeconfig=" + os.Getenv("CSI_AIO_TEST_KUBECONFIG"), "--csi-address=" + os.Getenv("CSI_AIO_TEST_SOCKET")}
+		main()
+		return
+	}
+
+	// Keep the socket path short enough for the Unix socket limit on macOS.
+	dir, err := os.MkdirTemp("/tmp", "csi-aio-signal-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "csi.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	driver := &notReadyDriver{probed: make(chan struct{}, 1)}
+	csi.RegisterIdentityServer(server, driver)
+	go server.Serve(listener)
+	defer server.Stop()
+
+	kubeconfig := filepath.Join(dir, "config")
+	config := "apiVersion: v1\nkind: Config\nclusters:\n- name: test\n  cluster:\n    server: https://127.0.0.1:6443\ncontexts:\n- name: test\n  context:\n    cluster: test\n    user: test\ncurrent-context: test\nusers:\n- name: test\n  user: {}\n"
+	if err := os.WriteFile(kubeconfig, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalDuringControllerStartup$")
+	cmd.Env = append(os.Environ(), "CSI_AIO_TEST_CHILD=1", "CSI_AIO_TEST_KUBECONFIG="+kubeconfig, "CSI_AIO_TEST_SOCKET="+socket)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-driver.probed:
+	case err := <-done:
+		t.Fatalf("process exited before CSI probe: %v", err)
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("process did not reach CSI probe")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("process failed after SIGTERM: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("process did not stop after SIGTERM while the CSI driver was not ready")
+	}
+}
+
+func TestControllerStopped(t *testing.T) {
+	previous := processShutdown
+	shutdown := make(chan struct{})
+	processShutdown = shutdown
+	t.Cleanup(func() { processShutdown = previous })
+
+	if err := controllerStopped("Attacher"); err == nil {
+		t.Fatal("unexpected controller exit must fail the AIO process")
+	}
+	close(shutdown)
+	if err := controllerStopped("Attacher"); err != nil {
+		t.Fatalf("signal-driven shutdown returned an error: %v", err)
+	}
+}
+
+func TestWaitForControllersDrainsOnPeerFailure(t *testing.T) {
+	shutdown := make(chan struct{})
+	var once sync.Once
+	requestShutdown := func() { once.Do(func() { close(shutdown) }) }
+	results := make(chan error, 2)
+	var active controllerLifecycle
+	if !active.begin(shutdown) {
+		t.Fatal("controller should start")
+	}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- waitForControllers(shutdown, results, requestShutdown, &active)
+	}()
+
+	want := errors.New("attacher stopped")
+	results <- want
+	select {
+	case <-shutdown:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer failure did not request shutdown")
+	}
+	select {
+	case <-returned:
+		t.Fatal("shutdown returned before the other controller drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	active.finish()
+	select {
+	case got := <-returned:
+		if got != want {
+			t.Fatalf("waitForControllers() = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after controller drain")
+	}
+}
+
+func TestWaitForControllersReportsBufferedFailureOnSignal(t *testing.T) {
+	shutdown := make(chan struct{})
+	results := make(chan error, 1)
+	want := errors.New("provisioner stopped")
+	results <- want
+	close(shutdown)
+	var active controllerLifecycle
+	if got := waitForControllers(shutdown, results, func() {}, &active); got != want {
+		t.Fatalf("waitForControllers() = %v, want %v", got, want)
+	}
+}
 
 // TestParseControllers covers the --controllers parsing, including the
 // edge cases that the previous inline strings.Split produced (an empty value

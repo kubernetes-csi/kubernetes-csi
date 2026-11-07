@@ -27,21 +27,12 @@ import (
 
 	csileaderelection "github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/rest"
 	clientleaderelection "k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/klog/v2"
 )
 
 var invalidLeaderElectionName = regexp.MustCompile("[^a-zA-Z0-9-]")
 
-// controllerLifecycle prevents shutdown from missing a controller that is
-// entering leader election as the signal arrives.
+// controllerLifecycle tracks controllers that started before shutdown.
 type controllerLifecycle struct {
 	mu      sync.Mutex
 	running sync.WaitGroup
@@ -71,11 +62,9 @@ func (l *controllerLifecycle) wait() {
 	l.running.Wait()
 }
 
-// runWithLeaderElection preserves the sidecars' leader election settings while
-// allowing the combined process to drain each controller before ending its
-// election. The upstream helper exits the whole process when any election
-// stops, including an intentional shutdown.
-func runWithLeaderElection(ctx context.Context, config *rest.Config, opts standardflags.SidecarConfiguration, run func(context.Context), driverName string, mux *http.ServeMux, releaseOnExit bool) {
+// runAIOController registers a controller for coordinated process shutdown.
+// With leader election enabled, AIO calls this only after the shared Lease is held.
+func runAIOController(ctx context.Context, run func(context.Context), mux *http.ServeMux, releaseOnExit bool) {
 	if !controllersInElection.begin(processShutdown) {
 		return
 	}
@@ -93,27 +82,7 @@ func runWithLeaderElection(ctx context.Context, config *rest.Config, opts standa
 			}
 		}()
 	}
-	if !opts.LeaderElection {
-		run(ctx)
-		return
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		klog.Fatalf("Failed to create leader election client: %v", err)
-	}
-	identity, err := os.Hostname()
-	if err != nil {
-		klog.Fatalf("Failed to get leader election identity: %v", err)
-	}
-	namespace := opts.LeaderElectionNamespace
-	if namespace == "" {
-		namespace = defaultLeaderElectionNamespace()
-	}
-
-	var healthCheck *clientleaderelection.HealthzAdaptor
-	if opts.HttpEndpoint != "" {
-		healthCheck = clientleaderelection.NewLeaderHealthzAdaptor(csileaderelection.DefaultHealthCheckTimeout)
+	if healthCheck, ok := ctx.Value(consolidatedLeaseContextKey{}).(*clientleaderelection.HealthzAdaptor); ok && standardflags.Configuration.HttpEndpoint != "" {
 		mux.HandleFunc(csileaderelection.HealthCheckerAddress, func(w http.ResponseWriter, r *http.Request) {
 			if err := healthCheck.Check(r); err != nil {
 				http.Error(w, fmt.Sprintf("internal server error: %v", err), http.StatusInternalServerError)
@@ -122,93 +91,7 @@ func runWithLeaderElection(ctx context.Context, config *rest.Config, opts standa
 			fmt.Fprint(w, "ok")
 		})
 	}
-
-	coordinateLeaderElection(ctx, processShutdown, run, func(electionCtx context.Context, callbacks clientleaderelection.LeaderCallbacks) {
-		broadcaster := record.NewBroadcaster(record.WithContext(electionCtx))
-		broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: clientset.CoreV1().Events(namespace)})
-		recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: fmt.Sprintf("%s/%s", driverName, identity)})
-		lock, err := resourcelock.NewWithLabels(
-			resourcelock.LeasesResourceLock,
-			namespace,
-			sanitizeLeaderElectionName(driverName),
-			clientset.CoreV1(),
-			clientset.CoordinationV1(),
-			resourcelock.ResourceLockConfig{Identity: sanitizeLeaderElectionName(identity), EventRecorder: recorder},
-			opts.LeaderElectionLabels,
-		)
-		if err != nil {
-			klog.Fatalf("Failed to create leader election lock: %v", err)
-		}
-		clientleaderelection.RunOrDie(electionCtx, clientleaderelection.LeaderElectionConfig{
-			Lock:            lock,
-			LeaseDuration:   opts.LeaderElectionLeaseDuration,
-			RenewDeadline:   opts.LeaderElectionRenewDeadline,
-			RetryPeriod:     opts.LeaderElectionRetryPeriod,
-			ReleaseOnCancel: releaseOnExit,
-			Callbacks:       callbacks,
-			WatchDog:        healthCheck,
-		})
-	}, func() {
-		klog.Error("Stopped leading")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-	})
-}
-
-// coordinateLeaderElection handles the race between receiving a shutdown
-// signal and becoming leader. A follower stops election immediately; a leader
-// keeps its lease until its run callback has returned.
-func coordinateLeaderElection(ctx context.Context, shutdown <-chan struct{}, run func(context.Context), elect func(context.Context, clientleaderelection.LeaderCallbacks), onLost func()) {
-	electionCtx, cancelElection := context.WithCancel(context.WithoutCancel(ctx))
-	defer cancelElection()
-
-	var mu sync.Mutex
-	started := false
-	runDone := make(chan struct{})
-	watcherDone := make(chan struct{})
-	go func() {
-		defer close(watcherDone)
-		select {
-		case <-shutdown:
-		case <-ctx.Done():
-		case <-electionCtx.Done():
-			return
-		}
-		mu.Lock()
-		if !started {
-			cancelElection()
-		}
-		mu.Unlock()
-	}()
-
-	elect(electionCtx, clientleaderelection.LeaderCallbacks{
-		OnStartedLeading: func(context.Context) {
-			mu.Lock()
-			if electionCtx.Err() != nil {
-				mu.Unlock()
-				return
-			}
-			started = true
-			mu.Unlock()
-
-			run(ctx)
-			close(runDone)
-			cancelElection()
-		},
-		OnStoppedLeading: func() {
-			if electionCtx.Err() == nil {
-				onLost()
-			}
-		},
-	})
-
-	mu.Lock()
-	wasStarted := started
-	mu.Unlock()
-	if wasStarted {
-		<-runDone
-	}
-	cancelElection()
-	<-watcherDone
+	run(ctx)
 }
 
 func sanitizeLeaderElectionName(name string) string {

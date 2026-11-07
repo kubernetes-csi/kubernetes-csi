@@ -32,10 +32,13 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/cmd/csi-sidecars/config"
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 type notReadyDriver struct {
@@ -108,6 +111,63 @@ func TestSignalDuringControllerStartup(t *testing.T) {
 		cmd.Process.Kill()
 		<-done
 		t.Fatal("process did not stop after SIGTERM while the CSI driver was not ready")
+	}
+}
+
+func TestBuildAIOKubeConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig := func(name string, cfg clientcmdapi.Config) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := clientcmd.WriteToFile(cfg, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	const explicitHost = "https://explicit.example"
+	const envHost = "https://environment.example"
+	const masterHost = "https://master.example"
+	explicit := writeConfig("explicit", clientcmdapi.Config{
+		Clusters:       map[string]*clientcmdapi.Cluster{"explicit": {Server: explicitHost}},
+		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"explicit": {Token: "explicit-token"}},
+		Contexts:       map[string]*clientcmdapi.Context{"explicit": {Cluster: "explicit", AuthInfo: "explicit"}},
+		CurrentContext: "explicit",
+	})
+	envContext := writeConfig("env-context", clientcmdapi.Config{
+		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"env": {Token: "env-token"}},
+		Contexts:       map[string]*clientcmdapi.Context{"env": {Cluster: "env", AuthInfo: "env"}},
+		CurrentContext: "env",
+	})
+	envCluster := writeConfig("env-cluster", clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{"env": {Server: envHost}},
+	})
+	t.Setenv("KUBECONFIG", strings.Join([]string{envContext, envCluster}, string(os.PathListSeparator)))
+
+	for _, tc := range []struct {
+		name, kubeconfig, master, host, token string
+	}{
+		{name: "explicit kubeconfig takes precedence", kubeconfig: explicit, host: explicitHost, token: "explicit-token"},
+		{name: "environment kubeconfig merges paths", host: envHost, token: "env-token"},
+		{name: "master overrides environment server", master: masterHost, host: masterHost, token: "env-token"},
+		{name: "master overrides explicit server", kubeconfig: explicit, master: masterHost, host: masterHost, token: "explicit-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := buildAIOKubeConfig(standardflags.SidecarConfiguration{
+				KubeConfig: tc.kubeconfig, KubeAPIQPS: 12.5, KubeAPIBurst: 23,
+			}, tc.master)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Host != tc.host {
+				t.Errorf("API server = %q, want %q", cfg.Host, tc.host)
+			}
+			if cfg.BearerToken != tc.token {
+				t.Error("credentials did not come from the expected kubeconfig")
+			}
+			if cfg.QPS != 12.5 || cfg.Burst != 23 {
+				t.Errorf("QPS and Burst = %v and %d, want 12.5 and 23", cfg.QPS, cfg.Burst)
+			}
+		})
 	}
 }
 
@@ -354,7 +414,6 @@ func TestCopyFlagsFromConfigToGlobalVars(t *testing.T) {
 
 	// Set distinct sentinel values on the source config so a mis-aliased
 	// pointer would surface as a wrong/zero value.
-	config.Configuration.Master = "https://master.example"
 	config.Configuration.Resync = 7 * time.Minute
 	config.Configuration.RetryIntervalStart = 3 * time.Second
 	config.Configuration.RetryIntervalMax = 11 * time.Minute
@@ -376,7 +435,6 @@ func TestCopyFlagsFromConfigToGlobalVars(t *testing.T) {
 	copyFlagsFromConfigToGlobalVars()
 
 	// AIO-specific.
-	assertPtr(t, "master", master, config.Configuration.Master)
 	assertPtr(t, "resync", resync, config.Configuration.Resync)
 	assertPtr(t, "resyncPeriod", resyncPeriod, config.Configuration.Resync)
 	assertPtr(t, "retryIntervalStart", retryIntervalStart, config.Configuration.RetryIntervalStart)

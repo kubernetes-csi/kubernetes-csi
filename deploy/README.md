@@ -85,6 +85,49 @@ confirms that image and waits for its rollout before the e2e tests.
 
 The versioned hostpath manifests are an e2e fixture, not a production deployment.
 
+### Migrating from individual controller sidecars
+
+For the Alpha AIO migration, stop **all** old attacher, provisioner, resizer,
+and snapshotter replicas for this driver before starting AIO, and prevent an
+operator or GitOps controller from recreating them. Do not use an overlapping
+rolling update. Start AIO with `--leader-election`; this uses one Lease named
+`csi-sidecars-<driver>` in the leader-election namespace, with the driver name
+sanitized as in the individual sidecars. Without that flag, the single-replica
+mode has no Lease migration guard.
+
+All AIO replicas for the same driver and leader-election namespace share that
+Lease and must use the same `--controllers` set. Only the elected replica runs
+its selected controllers. To run separate controller groups for the same
+driver, give each group a different `--leader-election-namespace` and grant its
+ServiceAccount Lease access there. If the legacy Leases live in another
+namespace, set `--legacy-lease-overrides` as described below.
+
+On its first election, the AIO leader temporarily acquires the selected old
+controllers' Leases through normal leader election, writes
+`aio.csi.k8s.io/migration-status: completed` on the AIO Lease, releases the old
+Leases, and then starts the controllers. A temporary
+`aio.csi.k8s.io/migration-release-pending` annotation makes a later leader
+repeat the check if release verification or finalization fails. It exits and
+retries on the next container restart if an old holder is still active or a
+Lease operation fails.
+Never delete an active Lease to force migration. The completion annotation is a
+record of the first check, not protection against old sidecars restarting.
+
+The default old Lease names are `external-attacher-leader-<driver>`, `<driver>`,
+`external-resizer-<driver>`, and `external-snapshotter-leader-<driver>` for
+attacher, provisioner, resizer, and snapshotter respectively. The driver name
+is sanitized as in each individual sidecar. All default to the AIO
+leader-election namespace. Check the actual names and namespaces in the old
+deployment; for differences, pass overrides such as
+`--legacy-lease-overrides=attacher=storage/old-attacher,resizer=storage/old-resizer`.
+Grant the AIO ServiceAccount Lease access in every overridden namespace.
+
+To roll back, stop every AIO replica and confirm its process has terminated,
+remove both migration annotations from the AIO Lease, then restore the old
+sidecars. Keep AIO stopped while the old sidecars run. Clear the annotation
+again before migrating a different set of controllers. Existing PVs, PVCs,
+VolumeAttachments, and snapshots do not need to be deleted.
+
 ### Running the tests locally
 
 ```bash

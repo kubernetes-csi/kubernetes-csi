@@ -26,7 +26,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +45,6 @@ import (
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
@@ -69,9 +67,7 @@ import (
 	referenceGrantv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 )
 
-func provisioner_main(ctx context.Context) {
-	var config *rest.Config
-	var err error
+func provisioner_main(ctx context.Context, config *rest.Config) {
 
 	if err := utilfeature.DefaultMutableFeatureGate.SetFromMap(featureGates); err != nil {
 		klog.Fatal(err)
@@ -96,28 +92,6 @@ func provisioner_main(ctx context.Context) {
 	if addr == "" {
 		addr = standardflags.Configuration.HttpEndpoint
 	}
-
-	// get the KUBECONFIG from env if specified (useful for local/debug cluster)
-	kubeconfigEnv := os.Getenv("KUBECONFIG")
-
-	if kubeconfigEnv != "" {
-		klog.Infof("Found KUBECONFIG environment variable set, using that..")
-		standardflags.Configuration.KubeConfig = kubeconfigEnv
-	}
-
-	if *master != "" || standardflags.Configuration.KubeConfig != "" {
-		klog.Infof("Either master or kubeconfig specified. building kube config from that..")
-		config, err = clientcmd.BuildConfigFromFlags(*master, standardflags.Configuration.KubeConfig)
-	} else {
-		klog.Infof("Building kube configs for running in cluster...")
-		config, err = rest.InClusterConfig()
-	}
-	if err != nil {
-		klog.Fatalf("Failed to create config: %v", err)
-	}
-
-	config.QPS = float32(standardflags.Configuration.KubeAPIQPS)
-	config.Burst = standardflags.Configuration.KubeAPIBurst
 
 	coreConfig := rest.CopyConfig(config)
 	coreConfig.ContentType = runtime.ContentTypeProtobuf
@@ -647,13 +621,5 @@ func provisioner_main(ctx context.Context) {
 		}
 	}
 
-	runWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		strings.Replace(provisionerName, "/", "-", -1),
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 }

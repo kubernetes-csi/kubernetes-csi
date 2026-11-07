@@ -230,8 +230,8 @@ commit.message = new_message.encode()
     NEW_FILE="cmd/csi-sidecars/${SIDECAR}_$(basename ${FILE})"
     cp -v -- "${FILE}" "${NEW_FILE}"
     # Rewrite disposable generated copies without creating backup files.
-    # Rename main()
-    sed -i "s/func main()/func ${SIDECAR}_main(ctx context.Context)/g" "${NEW_FILE}"
+    # AIO passes each controller a copy of the resolved Kubernetes client config.
+    sed -i "s/func main()/func ${SIDECAR}_main(ctx context.Context, config *rest.Config)/g" "${NEW_FILE}"
     # Remove variables (mostly flags)
     sed -i '/^var (/,/^)/d' "${NEW_FILE}"
     # Pass context from main.go
@@ -263,11 +263,12 @@ commit.message = new_message.encode()
     # Standalone var version (outside var() blocks) conflicts with main.go
     sed -i '/^var version/d' "${NEW_FILE}"
 
-    # AIO owns process signals and leader-election shutdown for all controllers.
+    # Controllers run under the process-wide AIO election and shutdown signal.
     sed -i '/k8s.io\/apiserver\/pkg\/server"/d' "${NEW_FILE}"
     sed -i '/github.com\/kubernetes-csi\/csi-lib-utils\/leaderelection"/d' "${NEW_FILE}"
     sed -i 's/server.SetupSignalHandler()/processShutdown/g' "${NEW_FILE}"
-    sed -i 's/leaderelection.RunWithLeaderElection(/runWithLeaderElection(/g' "${NEW_FILE}"
+    sed -i '/^\tleaderelection\.RunWithLeaderElection($/,/^\t)$/c\
+\trunAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))' "${NEW_FILE}"
 
     # Dead imports
     sed -i '/goflag/d' "${NEW_FILE}"
@@ -277,6 +278,8 @@ commit.message = new_message.encode()
 
     if [ "${SIDECAR}" = "resizer" ]; then
       sed -i '/strings/d' "${NEW_FILE}"
+      sed -i '/"github.com\/kubernetes-csi\/csi-sidecars\/pkg\/resizer\/pkg\/util"/d; /^\tleaseHolder := ""$/d; /^\t\tleaseHolder = resizerName$/d; /^\t\tif leaseHolder == "" {$/,+2d' "${NEW_FILE}"
+      sed -i '/"k8s.io\/client-go\/tools\/clientcmd"/d; /^\tvar config \*rest\.Config$/,/^\tconfig\.Burst = standardflags\.Configuration\.KubeAPIBurst$/d' "${NEW_FILE}"
       # Upstream external-resizer added dedicated --resize-timeout/--modify-timeout
       # flags plus a resolveOperationTimeouts() helper that inspects
       # flag.CommandLine (stdlib flag) to decide whether an explicitly-set
@@ -295,6 +298,9 @@ commit.message = new_message.encode()
     fi
     if [ "${SIDECAR}" = "attacher" ]; then
       sed -i '/strings/d' "${NEW_FILE}"
+      sed -i '/"github.com\/kubernetes-csi\/csi-lib-utils\/standardflags"/d' "${NEW_FILE}"
+      sed -i '/libconfig "github.com\/kubernetes-csi\/csi-lib-utils\/config"/d; /^\t\/\/ Create the client config\./,/^\t}$/d' "${NEW_FILE}"
+      sed -i '/^\t"k8s.io\/client-go\/kubernetes"$/a\	"k8s.io/client-go/rest"' "${NEW_FILE}"
       # Remove flag registration that uses flag.CommandLine (handled by main.go via RegisterAttacherFlagsWithPrefix)
       sed -i '/RegisterAttacherFlags.*flag.CommandLine/d' "${NEW_FILE}"
       sed -i '/^var attacherConfiguration/d' "${NEW_FILE}"
@@ -309,19 +315,16 @@ commit.message = new_message.encode()
       sed -i 's/standardflags\.Configuration\.ShowVersion/*showVersion/g' "${NEW_FILE}"
       sed -i 's/standardflags\.Configuration\.MetricsAddress/*metricsAddress/g' "${NEW_FILE}"
       sed -i 's/standardflags\.Configuration\.HttpEndpoint/*httpEndpoint/g' "${NEW_FILE}"
-      sed -i 's/standardflags\.Configuration\.KubeConfig/*kubeconfig/g' "${NEW_FILE}"
       sed -i 's/standardflags\.Configuration\.CSIAddress/*csiAddress/g' "${NEW_FILE}"
       sed -i 's/standardflags\.Configuration\.MetricsPath/*metricsPath/g' "${NEW_FILE}"
-      # Remove only the standardflags.RegisterCommonFlags import alias line if present,
-      # but keep the standardflags package import and bare standardflags.Configuration
-      # usages (passed to libconfig.BuildConfig and runWithLeaderElection).
-      # The field accesses (e.g. standardflags.Configuration.ShowVersion) were already
-      # replaced with global vars above.
     fi
     if [ "${SIDECAR}" = "provisioner" ]; then
       # Remove pre-Go 1.21 max() helper that shadows the builtin
       sed -i '/^\/\/ max returns/,/^}/d' "${NEW_FILE}"
       if [[ $(basename "${FILE}") == csi-provisioner.go ]]; then
+        sed -i '/^\t"strings"$/d' "${NEW_FILE}"
+        sed -i '/"k8s.io\/client-go\/tools\/clientcmd"/d; /^\tvar config \*rest\.Config$/,+2d' "${NEW_FILE}"
+        sed -i '/^\t\/\/ get the KUBECONFIG from env/,/^\tconfig\.Burst = standardflags\.Configuration\.KubeAPIBurst$/d' "${NEW_FILE}"
         # During shutdown, cache synchronization must follow the controller's
         # context so a pending sync cannot hold the leader lease open. Keep
         # the informers' original stop channel until the workers have drained.
@@ -338,17 +341,15 @@ commit.message = new_message.encode()
       fi
     fi
     if [ "${SIDECAR}" = "snapshotter" ]; then
-      # NOTE: unlike other sidecars, do NOT remove strings import for snapshotter
-      # because it's used in the runWithLeaderElection call
-      # Restore the prefix var that was inside var(...) block (stripped by sed)
-      sed -i '/^func snapshotter_main/i\var snapshotterPrefix = "external-snapshotter-leader"' "${NEW_FILE}"
+      sed -i '/^\t"strings"$/d' "${NEW_FILE}"
       sed -i 's/\bprefix\b/snapshotterPrefix/g' "${NEW_FILE}"
       # Rename colliding variables to avoid conflicts with other sidecar globals
       sed -i 's/\bthreads\b/snapshotterThreads/g' "${NEW_FILE}"
       sed -i 's/\bextraCreateMetadata\b/snapshotterExtraCreateMetadata/g' "${NEW_FILE}"
       sed -i 's/\benableNodeDeployment\b/snapshotterEnableNodeDeployment/g' "${NEW_FILE}"
       sed -i 's/\bcsiTimeout\b/snapshotterCSITimeout/g' "${NEW_FILE}"
-      sed -i 's/\bbuildConfig\b/snapshotterBuildConfig/g' "${NEW_FILE}"
+      sed -i '/"k8s.io\/client-go\/tools\/clientcmd"/d; /libconfig "github.com\/kubernetes-csi\/csi-lib-utils\/config"/d' "${NEW_FILE}"
+      sed -i '/^\t\/\/ Create the client config\./,/^\t}$/d; /^func buildConfig(/,/^}/d' "${NEW_FILE}"
       # Snapshotter's standalone entrypoint waits only for SIGINT. In AIO it
       # must stop on the shared context, including SIGTERM and peer failures.
       sed -i '/"os\/signal"/d' "${NEW_FILE}"
@@ -413,6 +414,8 @@ symlink_from_root_to_tools tools/cmd/csi-sidecars/main_test.go
 # AIO-specific leader-election lifecycle, shared by the generated controllers.
 symlink_from_root_to_tools tools/cmd/csi-sidecars/leader_election.go
 symlink_from_root_to_tools tools/cmd/csi-sidecars/leader_election_test.go
+symlink_from_root_to_tools tools/cmd/csi-sidecars/lease_migration.go
+symlink_from_root_to_tools tools/cmd/csi-sidecars/lease_migration_test.go
 # The utility global function to register common and per-sidecar flags.
 symlink_from_root_to_tools tools/cmd/csi-sidecars/config/flags.go
 # Tooling tests for the AIO flag registration.

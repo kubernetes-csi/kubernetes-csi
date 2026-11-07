@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -37,12 +36,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	klog "k8s.io/klog/v2"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	libconfig "github.com/kubernetes-csi/csi-lib-utils/config"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	csirpc "github.com/kubernetes-csi/csi-lib-utils/rpc"
@@ -69,9 +66,7 @@ const (
 
 // Command line flags
 
-var snapshotterPrefix = "external-snapshotter-leader"
-
-func snapshotter_main(ctx context.Context) {
+func snapshotter_main(ctx context.Context, config *rest.Config) {
 
 	if err := utilfeature.DefaultMutableFeatureGate.SetFromMap(featureGates); err != nil {
 		klog.Fatal("Error while parsing feature gates: ", err)
@@ -86,13 +81,6 @@ func snapshotter_main(ctx context.Context) {
 	// If distributed snapshotting is enabled and leaderElection is also set to true, return
 	if *snapshotterEnableNodeDeployment && standardflags.Configuration.LeaderElection {
 		klog.Error("Leader election cannot happen when node-deployment is set to true")
-		os.Exit(1)
-	}
-
-	// Create the client config. Use kubeconfig if given, otherwise assume in-cluster.
-	config, err := libconfig.BuildConfig(standardflags.Configuration.KubeConfig, standardflags.Configuration)
-	if err != nil {
-		klog.Error(err.Error())
 		os.Exit(1)
 	}
 
@@ -321,23 +309,8 @@ func snapshotter_main(ctx context.Context) {
 		}
 	}
 
-	runWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		fmt.Sprintf("%s-%s", snapshotterPrefix, strings.Replace(driverName, "/", "-", -1)),
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 
-}
-
-func snapshotterBuildConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
 }
 
 func supportsControllerCreateSnapshot(ctx context.Context, conn *grpc.ClientConn) (bool, error) {

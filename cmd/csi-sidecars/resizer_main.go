@@ -31,7 +31,6 @@ import (
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/csi"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"k8s.io/client-go/util/workqueue"
 
@@ -41,7 +40,6 @@ import (
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/modifier"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/modifycontroller"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/resizer"
-	"github.com/kubernetes-csi/csi-sidecars/pkg/resizer/pkg/util"
 	csitrans "k8s.io/csi-translation-lib"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -54,7 +52,7 @@ import (
 	_ "k8s.io/component-base/metrics/prometheus/workqueue"               // register work queues in the default legacy registry
 )
 
-func resizer_main(ctx context.Context) {
+func resizer_main(ctx context.Context, config *rest.Config) {
 
 	effectiveResizeTimeout, effectiveModifyTimeout := *resizeTimeout, *modifyTimeout
 
@@ -77,20 +75,6 @@ func resizer_main(ctx context.Context) {
 		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
 	}
 
-	var config *rest.Config
-	var err error
-	if *master != "" || standardflags.Configuration.KubeConfig != "" {
-		config, err = clientcmd.BuildConfigFromFlags(*master, standardflags.Configuration.KubeConfig)
-	} else {
-		config, err = rest.InClusterConfig()
-	}
-	if err != nil {
-		klog.ErrorS(err, "Failed to create cluster config")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-	}
-
-	config.QPS = float32(standardflags.Configuration.KubeAPIQPS)
-	config.Burst = standardflags.Configuration.KubeAPIBurst
 	config.ContentType = runtime.ContentTypeProtobuf
 
 	kubeClient, err := kubernetes.NewForConfig(config)
@@ -179,7 +163,6 @@ func resizer_main(ctx context.Context) {
 		}()
 	}
 
-	leaseHolder := ""
 	var rc controller.ResizeController
 	if csiResizer != nil {
 		resizerName := csiResizer.Name()
@@ -187,7 +170,6 @@ func resizer_main(ctx context.Context) {
 			workqueue.NewTypedItemExponentialFailureRateLimiter[string](*retryIntervalStart, *retryIntervalMax),
 			*handleVolumeInUseError, *retryIntervalMax)
 
-		leaseHolder = resizerName
 	}
 
 	var mc modifycontroller.ModifyController
@@ -200,9 +182,6 @@ func resizer_main(ctx context.Context) {
 				workqueue.NewTypedItemExponentialFailureRateLimiter[string](*retryIntervalStart, *retryIntervalMax))
 		}
 
-		if leaseHolder == "" {
-			leaseHolder = modifierName
-		}
 	}
 
 	// handle SIGTERM and SIGINT by cancelling the context.
@@ -252,15 +231,7 @@ func resizer_main(ctx context.Context) {
 		}
 	}
 
-	runWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		"external-resizer-"+util.SanitizeName(leaseHolder),
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 }
 
 func getDriverName(client csi.Client, timeout time.Duration) (string, error) {

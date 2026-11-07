@@ -44,10 +44,16 @@ Kubernetes cluster, replacing the paths with your configuration:
   --kubeconfig=/path/to/kubeconfig
 ```
 
+AIO uses the same Kubernetes configuration for all controllers and leader
+election. `--kubeconfig` takes precedence over `KUBECONFIG`, and `--master`
+overrides the API server URL. When none is set, AIO uses in-cluster configuration.
+
 The enabled controllers require the corresponding driver capabilities and
 Kubernetes permissions; snapshot support also requires the snapshot CRDs and
 separate snapshot-controller. Multiple controllers cannot yet share
 `--http-endpoint` or `--metrics-address`.
+For a migration from individual sidecars, follow the stop-before-start and
+legacy Lease steps in the [deployment guide](deploy/README.md).
 
 Build and inspect local container images without publishing them:
 

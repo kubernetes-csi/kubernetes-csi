@@ -31,6 +31,9 @@ import (
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
 	flag "github.com/spf13/pflag"
 	"k8s.io/apiserver/pkg/server"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
@@ -41,9 +44,6 @@ import (
 )
 
 var (
-	master                      *string
-	kubeconfig                  *string
-	kubeConfig                  *string
 	csiEndpoint                 *string
 	csiAddress                  *string
 	showVersion                 *bool
@@ -62,8 +62,6 @@ var (
 	leaderElectionLeaseDuration *time.Duration
 	leaderElectionRenewDeadline *time.Duration
 	leaderElectionRetryPeriod   *time.Duration
-	kubeAPIQPS                  *float32
-	kubeAPIBurst                *int
 	defaultFSType               *string
 	httpEndpoint                *string
 	metricsAddress              *string
@@ -125,15 +123,12 @@ var (
 // This is a workaround until the sidecars are refactored to work with a nested config.
 func copyFlagsFromConfigToGlobalVars() {
 	// AIO-specific flags from config.Configuration
-	master = &config.Configuration.Master
 	resync = &config.Configuration.Resync
 	resyncPeriod = &config.Configuration.Resync
 	retryIntervalStart = &config.Configuration.RetryIntervalStart
 	retryIntervalMax = &config.Configuration.RetryIntervalMax
 
 	// Common flags from standardflags.Configuration
-	kubeconfig = &standardflags.Configuration.KubeConfig
-	kubeConfig = &standardflags.Configuration.KubeConfig
 	csiEndpoint = &standardflags.Configuration.CSIAddress
 	csiAddress = &standardflags.Configuration.CSIAddress
 	showVersion = &standardflags.Configuration.ShowVersion
@@ -143,10 +138,6 @@ func copyFlagsFromConfigToGlobalVars() {
 	leaderElectionRenewDeadline = &standardflags.Configuration.LeaderElectionRenewDeadline
 	leaderElectionRetryPeriod = &standardflags.Configuration.LeaderElectionRetryPeriod
 
-	kubeAPIQPSFloat32 := float32(standardflags.Configuration.KubeAPIQPS)
-	kubeAPIQPS = &kubeAPIQPSFloat32
-
-	kubeAPIBurst = &standardflags.Configuration.KubeAPIBurst
 	httpEndpoint = &standardflags.Configuration.HttpEndpoint
 	metricsAddress = &standardflags.Configuration.MetricsAddress
 	metricsPath = &standardflags.Configuration.MetricsPath
@@ -235,6 +226,32 @@ func validateControllers(enabled map[string]bool) error {
 	return nil
 }
 
+// buildAIOKubeConfig resolves the API server once for the election and every
+// enabled controller so the Lease protects the cluster they operate on.
+func buildAIOKubeConfig(opts standardflags.SidecarConfiguration, master string) (*rest.Config, error) {
+	var cfg *rest.Config
+	var err error
+	switch {
+	case opts.KubeConfig != "":
+		cfg, err = clientcmd.BuildConfigFromFlags(master, opts.KubeConfig)
+	case os.Getenv(clientcmd.RecommendedConfigPathEnvVar) != "":
+		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			clientcmd.NewDefaultClientConfigLoadingRules(),
+			&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: master}},
+		).ClientConfig()
+	case master != "":
+		cfg, err = clientcmd.BuildConfigFromFlags(master, "")
+	default:
+		cfg, err = rest.InClusterConfig()
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg.QPS = float32(opts.KubeAPIQPS)
+	cfg.Burst = opts.KubeAPIBurst
+	return cfg, nil
+}
+
 func main() {
 	flag.Var(utilflag.NewMapStringBool(&featureGates), "feature-gates", "A set of key=value pairs that describe feature gates for alpha/experimental features. "+
 		"Options are:\n"+strings.Join(utilfeature.DefaultFeatureGate.KnownFeatures(), "\n"))
@@ -272,6 +289,10 @@ func main() {
 	if err := validateControllers(controllersToEnable); err != nil {
 		klog.Fatal(err)
 	}
+	kubeClientConfig, err := buildAIOKubeConfig(standardflags.Configuration, config.Configuration.Master)
+	if err != nil {
+		klog.Fatalf("Failed to build AIO Kubernetes client config: %v", err)
+	}
 
 	signalShutdown := server.SetupSignalHandler()
 	shutdown := make(chan struct{})
@@ -290,10 +311,13 @@ func main() {
 			return err
 		}
 		controllerResults := make(chan error, len(controllersToEnable))
-		start := func(name string, run func(context.Context)) {
+		start := func(name string, run func(context.Context, *rest.Config)) {
 			go func() {
 				if ctx.Err() == nil {
-					run(ctx)
+					controllerConfig := *kubeClientConfig
+					// client-go's config copies can write to the exec provider config.
+					controllerConfig.ExecProvider = kubeClientConfig.ExecProvider.DeepCopy()
+					run(ctx, &controllerConfig)
 				}
 				controllerResults <- controllerStopped(name)
 			}()
@@ -320,13 +344,18 @@ func main() {
 			start("Snapshotter", snapshotter_main)
 		}
 		// Wait for running controllers to drain. Initializing controllers cannot
-		// enter leader election after shutdown and must not delay process exit.
+		// start processing after shutdown and must not delay process exit.
 		err := waitForControllers(processShutdown, controllerResults, requestShutdown, &controllersInElection)
 		close(stopWatching)
 		return err
 	}
 
-	if err := runControllers(context.Background()); err != nil {
+	if standardflags.Configuration.LeaderElection {
+		err = runWithConsolidatedLease(context.Background(), kubeClientConfig, controllersToEnable, requestShutdown, runControllers)
+	} else {
+		err = runControllers(context.Background())
+	}
+	if err != nil {
 		klog.Fatal(err)
 	}
 }

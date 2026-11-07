@@ -51,7 +51,8 @@ type AIOConfiguration struct {
 	ResizeTimeout time.Duration
 	ModifyTimeout time.Duration
 
-	Controllers string
+	Controllers          string
+	LegacyLeaseOverrides string
 
 	AttacherConfiguration    attacherconfiguration.AttacherConfiguration
 	SnapshotterConfiguration SnapshotterConfiguration
@@ -65,11 +66,12 @@ var Configuration = AIOConfiguration{
 // RegisterAIOFlags registers AIO-specific flags that are not part of the
 // common sidecar flags provided by standardflags.RegisterCommonFlags.
 func RegisterAIOFlags(flags *flag.FlagSet) {
-	flags.StringVar(&Configuration.Master, "master", "", "Master URL to build a client config from. Either this or kubeconfig needs to be set if the provisioner is being run out of cluster.")
+	flags.StringVar(&Configuration.Master, "master", "", "Kubernetes API server URL override for AIO controllers and leader election.")
 	flags.DurationVar(&Configuration.Resync, "resync", 10*time.Minute, "Resync interval of the controller.")
 	flags.DurationVar(&Configuration.RetryIntervalStart, "retry-interval-start", time.Second, "Initial retry interval of failed create volume or deletion. It doubles with each failure, up to retry-interval-max.")
 	flags.DurationVar(&Configuration.RetryIntervalMax, "retry-interval-max", 5*time.Minute, "Maximum retry interval of failed create volume or deletion.")
 	flags.StringVar(&Configuration.Controllers, "controllers", "", "A comma-separated list of controllers to enable. The possible values are: [resizer,attacher,provisioner,snapshotter]")
+	flags.StringVar(&Configuration.LegacyLeaseOverrides, "legacy-lease-overrides", "", "Legacy leader-election Lease overrides for migration, as controller=namespace/name pairs separated by commas.")
 	flags.DurationVar(&Configuration.ResizeTimeout, "resizer-resize-timeout", 10*time.Second, "Timeout for ControllerExpandVolume calls issued by the resizer controller.")
 	flags.DurationVar(&Configuration.ModifyTimeout, "resizer-modify-timeout", 10*time.Second, "Timeout for ControllerModifyVolume calls issued by the resizer controller.")
 }

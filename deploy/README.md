@@ -85,6 +85,13 @@ confirms that image and waits for its rollout before the e2e tests.
 
 The versioned hostpath manifests are an e2e fixture, not a production deployment.
 
+In the Prow test cluster, the deployment first starts the four standalone
+sidecars from the original hostpath fixture and waits for them to hold their
+Leases. It then scales the StatefulSet to zero, waits for the old Pod to be
+deleted, and deploys AIO. Before CSI sanity and storage E2E begin, the script
+checks that migration is finalized and that each original Lease was taken over
+once and released.
+
 ### Migrating from individual controller sidecars
 
 For the Alpha AIO migration, stop **all** old attacher, provisioner, resizer,

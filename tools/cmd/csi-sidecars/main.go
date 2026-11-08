@@ -23,14 +23,17 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/cmd/csi-sidecars/config"
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
 	flag "github.com/spf13/pflag"
+	"k8s.io/apiserver/pkg/server"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	logsapi "k8s.io/component-base/logs/api/v1"
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 
@@ -41,9 +44,6 @@ import (
 )
 
 var (
-	master                      *string
-	kubeconfig                  *string
-	kubeConfig                  *string
 	csiEndpoint                 *string
 	csiAddress                  *string
 	showVersion                 *bool
@@ -62,8 +62,6 @@ var (
 	leaderElectionLeaseDuration *time.Duration
 	leaderElectionRenewDeadline *time.Duration
 	leaderElectionRetryPeriod   *time.Duration
-	kubeAPIQPS                  *float32
-	kubeAPIBurst                *int
 	defaultFSType               *string
 	httpEndpoint                *string
 	metricsAddress              *string
@@ -115,8 +113,9 @@ var (
 	handleVolumeInUseError = flag.Bool("resizer-handle-volume-inuse-error", true, "Flag to turn on/off capability to handle volume in use error in resizer controller. Defaults to true if not set.")
 	extraModifyMetadata    = flag.Bool("resizer-extra-modify-metadata", false, "If set, add pv/pvc metadata to plugin modify requests as parameters.")
 
-	featureGates map[string]bool
-	version      = "unknown"
+	featureGates    map[string]bool
+	version         = "unknown"
+	processShutdown <-chan struct{}
 )
 
 // copyFlagsFromConfigToGlobalVars copies flags from standardflags.Configuration
@@ -124,15 +123,12 @@ var (
 // This is a workaround until the sidecars are refactored to work with a nested config.
 func copyFlagsFromConfigToGlobalVars() {
 	// AIO-specific flags from config.Configuration
-	master = &config.Configuration.Master
 	resync = &config.Configuration.Resync
 	resyncPeriod = &config.Configuration.Resync
 	retryIntervalStart = &config.Configuration.RetryIntervalStart
 	retryIntervalMax = &config.Configuration.RetryIntervalMax
 
 	// Common flags from standardflags.Configuration
-	kubeconfig = &standardflags.Configuration.KubeConfig
-	kubeConfig = &standardflags.Configuration.KubeConfig
 	csiEndpoint = &standardflags.Configuration.CSIAddress
 	csiAddress = &standardflags.Configuration.CSIAddress
 	showVersion = &standardflags.Configuration.ShowVersion
@@ -142,10 +138,6 @@ func copyFlagsFromConfigToGlobalVars() {
 	leaderElectionRenewDeadline = &standardflags.Configuration.LeaderElectionRenewDeadline
 	leaderElectionRetryPeriod = &standardflags.Configuration.LeaderElectionRetryPeriod
 
-	kubeAPIQPSFloat32 := float32(standardflags.Configuration.KubeAPIQPS)
-	kubeAPIQPS = &kubeAPIQPSFloat32
-
-	kubeAPIBurst = &standardflags.Configuration.KubeAPIBurst
 	httpEndpoint = &standardflags.Configuration.HttpEndpoint
 	metricsAddress = &standardflags.Configuration.MetricsAddress
 	metricsPath = &standardflags.Configuration.MetricsPath
@@ -234,6 +226,32 @@ func validateControllers(enabled map[string]bool) error {
 	return nil
 }
 
+// buildAIOKubeConfig resolves the API server once for the election and every
+// enabled controller so the Lease protects the cluster they operate on.
+func buildAIOKubeConfig(opts standardflags.SidecarConfiguration, master string) (*rest.Config, error) {
+	var cfg *rest.Config
+	var err error
+	switch {
+	case opts.KubeConfig != "":
+		cfg, err = clientcmd.BuildConfigFromFlags(master, opts.KubeConfig)
+	case os.Getenv(clientcmd.RecommendedConfigPathEnvVar) != "":
+		cfg, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			clientcmd.NewDefaultClientConfigLoadingRules(),
+			&clientcmd.ConfigOverrides{ClusterInfo: clientcmdapi.Cluster{Server: master}},
+		).ClientConfig()
+	case master != "":
+		cfg, err = clientcmd.BuildConfigFromFlags(master, "")
+	default:
+		cfg, err = rest.InClusterConfig()
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg.QPS = float32(opts.KubeAPIQPS)
+	cfg.Burst = opts.KubeAPIBurst
+	return cfg, nil
+}
+
 func main() {
 	flag.Var(utilflag.NewMapStringBool(&featureGates), "feature-gates", "A set of key=value pairs that describe feature gates for alpha/experimental features. "+
 		"Options are:\n"+strings.Join(utilfeature.DefaultFeatureGate.KnownFeatures(), "\n"))
@@ -267,39 +285,108 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	errs, ctx := errgroup.WithContext(context.Background())
-
 	controllersToEnable := parseControllers(config.Configuration.Controllers)
 	if err := validateControllers(controllersToEnable); err != nil {
 		klog.Fatal(err)
 	}
+	kubeClientConfig, err := buildAIOKubeConfig(standardflags.Configuration, config.Configuration.Master)
+	if err != nil {
+		klog.Fatalf("Failed to build AIO Kubernetes client config: %v", err)
+	}
 
-	// TODO: Get main from each sidecar to return an error so we can handle it here
-	if _, ok := controllersToEnable["attacher"]; ok {
-		errs.Go(func() error {
-			attacher_main(ctx)
-			return fmt.Errorf("Attacher stopped")
-		})
+	signalShutdown := server.SetupSignalHandler()
+	shutdown := make(chan struct{})
+	processShutdown = shutdown
+	var shutdownOnce sync.Once
+	requestShutdown := func() {
+		shutdownOnce.Do(func() { close(shutdown) })
 	}
-	if _, ok := controllersToEnable["provisioner"]; ok {
-		errs.Go(func() error {
-			provisioner_main(ctx)
-			return fmt.Errorf("Provisioner stopped")
-		})
+	go func() {
+		<-signalShutdown
+		requestShutdown()
+	}()
+
+	runControllers := func(ctx context.Context) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		controllerResults := make(chan error, len(controllersToEnable))
+		start := func(name string, run func(context.Context, *rest.Config)) {
+			go func() {
+				if ctx.Err() == nil {
+					controllerConfig := *kubeClientConfig
+					// client-go's config copies can write to the exec provider config.
+					controllerConfig.ExecProvider = kubeClientConfig.ExecProvider.DeepCopy()
+					run(ctx, &controllerConfig)
+				}
+				controllerResults <- controllerStopped(name)
+			}()
+		}
+		stopWatching := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				requestShutdown()
+			case <-stopWatching:
+			}
+		}()
+
+		if _, ok := controllersToEnable["attacher"]; ok {
+			start("Attacher", attacher_main)
+		}
+		if _, ok := controllersToEnable["provisioner"]; ok {
+			start("Provisioner", provisioner_main)
+		}
+		if _, ok := controllersToEnable["resizer"]; ok {
+			start("Resizer", resizer_main)
+		}
+		if _, ok := controllersToEnable["snapshotter"]; ok {
+			start("Snapshotter", snapshotter_main)
+		}
+		// Wait for running controllers to drain. Initializing controllers cannot
+		// start processing after shutdown and must not delay process exit.
+		err := waitForControllers(processShutdown, controllerResults, requestShutdown, &controllersInElection)
+		close(stopWatching)
+		return err
 	}
-	if _, ok := controllersToEnable["resizer"]; ok {
-		errs.Go(func() error {
-			resizer_main(ctx)
-			return fmt.Errorf("Resizer stopped")
-		})
+
+	if standardflags.Configuration.LeaderElection {
+		err = runWithConsolidatedLease(context.Background(), kubeClientConfig, controllersToEnable, requestShutdown, runControllers)
+	} else {
+		err = runControllers(context.Background())
 	}
-	if _, ok := controllersToEnable["snapshotter"]; ok {
-		errs.Go(func() error {
-			snapshotter_main(ctx)
-			return fmt.Errorf("Snapshotter stopped")
-		})
+	if err != nil {
+		klog.Fatal(err)
 	}
-	if err := errs.Wait(); err != nil {
-		panic(err)
+}
+
+func waitForControllers(shutdown <-chan struct{}, results <-chan error, requestShutdown func(), active *controllerLifecycle) error {
+	var exitError error
+	select {
+	case <-shutdown:
+	case exitError = <-results:
+		if exitError != nil {
+			requestShutdown()
+		}
+	}
+	active.wait()
+	for {
+		select {
+		case err := <-results:
+			if exitError == nil {
+				exitError = err
+			}
+		default:
+			return exitError
+		}
+	}
+}
+
+func controllerStopped(name string) error {
+	select {
+	case <-processShutdown:
+		return nil
+	default:
+		return fmt.Errorf("%s stopped", name)
 	}
 }

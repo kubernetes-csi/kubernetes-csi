@@ -26,7 +26,6 @@ import (
 	"net/http/pprof"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -40,14 +39,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
-	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
@@ -57,7 +54,6 @@ import (
 	"sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller"
 	libmetrics "sigs.k8s.io/sig-storage-lib-external-provisioner/v13/controller/metrics"
 
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/provisioner/pkg/capacity"
@@ -71,9 +67,7 @@ import (
 	referenceGrantv1beta1 "sigs.k8s.io/gateway-api/pkg/client/listers/apis/v1beta1"
 )
 
-func provisioner_main(ctx context.Context) {
-	var config *rest.Config
-	var err error
+func provisioner_main(ctx context.Context, config *rest.Config) {
 
 	if err := utilfeature.DefaultMutableFeatureGate.SetFromMap(featureGates); err != nil {
 		klog.Fatal(err)
@@ -98,28 +92,6 @@ func provisioner_main(ctx context.Context) {
 	if addr == "" {
 		addr = standardflags.Configuration.HttpEndpoint
 	}
-
-	// get the KUBECONFIG from env if specified (useful for local/debug cluster)
-	kubeconfigEnv := os.Getenv("KUBECONFIG")
-
-	if kubeconfigEnv != "" {
-		klog.Infof("Found KUBECONFIG environment variable set, using that..")
-		standardflags.Configuration.KubeConfig = kubeconfigEnv
-	}
-
-	if *master != "" || standardflags.Configuration.KubeConfig != "" {
-		klog.Infof("Either master or kubeconfig specified. building kube config from that..")
-		config, err = clientcmd.BuildConfigFromFlags(*master, standardflags.Configuration.KubeConfig)
-	} else {
-		klog.Infof("Building kube configs for running in cluster...")
-		config, err = rest.InClusterConfig()
-	}
-	if err != nil {
-		klog.Fatalf("Failed to create config: %v", err)
-	}
-
-	config.QPS = float32(standardflags.Configuration.KubeAPIQPS)
-	config.Burst = standardflags.Configuration.KubeAPIBurst
 
 	coreConfig := rest.CopyConfig(config)
 	coreConfig.ContentType = runtime.ContentTypeProtobuf
@@ -557,7 +529,7 @@ func provisioner_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx)
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -569,6 +541,10 @@ func provisioner_main(ctx context.Context) {
 	}
 
 	run := func(ctx context.Context) {
+		cacheSyncCtx := ctx
+		if utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit) {
+			cacheSyncCtx = controllerCtx
+		}
 
 		factory.Start(ctx.Done())
 		if factoryForNamespace != nil {
@@ -579,9 +555,12 @@ func provisioner_main(ctx context.Context) {
 		if topologyInformer != nil {
 			go topologyInformer.RunWorker(ctx)
 		}
-		cacheSyncResult := factory.WaitForCacheSync(ctx.Done())
+		cacheSyncResult := factory.WaitForCacheSync(cacheSyncCtx.Done())
 		for _, v := range cacheSyncResult {
 			if !v {
+				if cacheSyncCtx.Err() != nil {
+					return
+				}
 				klog.Fatalf("Failed to sync Informers!")
 			}
 		}
@@ -590,9 +569,12 @@ func provisioner_main(ctx context.Context) {
 			if gatewayFactory != nil {
 				gatewayFactory.Start(ctx.Done())
 			}
-			gatewayCacheSyncResult := gatewayFactory.WaitForCacheSync(ctx.Done())
+			gatewayCacheSyncResult := gatewayFactory.WaitForCacheSync(cacheSyncCtx.Done())
 			for _, v := range gatewayCacheSyncResult {
 				if !v {
+					if cacheSyncCtx.Err() != nil {
+						return
+					}
 					klog.Fatalf("Failed to sync Informers for gateway!")
 				}
 			}
@@ -639,13 +621,5 @@ func provisioner_main(ctx context.Context) {
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		strings.Replace(provisionerName, "/", "-", -1),
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 }

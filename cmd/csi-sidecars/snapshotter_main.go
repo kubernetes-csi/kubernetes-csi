@@ -23,8 +23,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
-	"strings"
 	"sync"
 	"time"
 
@@ -33,20 +31,16 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	klog "k8s.io/klog/v2"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	libconfig "github.com/kubernetes-csi/csi-lib-utils/config"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	csirpc "github.com/kubernetes-csi/csi-lib-utils/rpc"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
@@ -72,9 +66,7 @@ const (
 
 // Command line flags
 
-var snapshotterPrefix = "external-snapshotter-leader"
-
-func snapshotter_main(ctx context.Context) {
+func snapshotter_main(ctx context.Context, config *rest.Config) {
 
 	if err := utilfeature.DefaultMutableFeatureGate.SetFromMap(featureGates); err != nil {
 		klog.Fatal("Error while parsing feature gates: ", err)
@@ -89,13 +81,6 @@ func snapshotter_main(ctx context.Context) {
 	// If distributed snapshotting is enabled and leaderElection is also set to true, return
 	if *snapshotterEnableNodeDeployment && standardflags.Configuration.LeaderElection {
 		klog.Error("Leader election cannot happen when node-deployment is set to true")
-		os.Exit(1)
-	}
-
-	// Create the client config. Use kubeconfig if given, otherwise assume in-cluster.
-	config, err := libconfig.BuildConfig(standardflags.Configuration.KubeConfig, standardflags.Configuration)
-	if err != nil {
-		klog.Error(err.Error())
 		os.Exit(1)
 	}
 
@@ -287,7 +272,7 @@ func snapshotter_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx)
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -307,7 +292,7 @@ func snapshotter_main(ctx context.Context) {
 			coreFactory.Start(stopCh)
 			var controllerWg sync.WaitGroup
 			go ctrl.Run(*snapshotterThreads, stopCh, &controllerWg)
-			<-shutdownHandler
+			<-controllerCtx.Done()
 			controllerWg.Wait()
 			terminate()
 		} else {
@@ -318,31 +303,14 @@ func snapshotter_main(ctx context.Context) {
 			coreFactory.Start(stopCh)
 			go ctrl.Run(*snapshotterThreads, stopCh, nil)
 
-			// ...until SIGINT
-			c := make(chan os.Signal, 1)
-			signal.Notify(c, os.Interrupt)
-			<-c
+			// ...until context cancellation
+			<-ctx.Done()
 			close(stopCh)
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		fmt.Sprintf("%s-%s", snapshotterPrefix, strings.Replace(driverName, "/", "-", -1)),
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 
-}
-
-func snapshotterBuildConfig(kubeconfig string) (*rest.Config, error) {
-	if kubeconfig != "" {
-		return clientcmd.BuildConfigFromFlags("", kubeconfig)
-	}
-	return rest.InClusterConfig()
 }
 
 func supportsControllerCreateSnapshot(ctx context.Context, conn *grpc.ClientConn) (bool, error) {

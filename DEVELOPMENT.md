@@ -130,6 +130,10 @@ which builds all three commands for Linux amd64/arm64 and publishes their images
 The builder digest in the YAML must match the build-environment lock; a tooling
 test and runtime preflight enforce this.
 
+The staging images are published as `csi-sidecars`, `aio-snapshot-controller`,
+and `aio-snapshot-conversion-webhook` under `gcr.io/k8s-staging-sig-storage`.
+The AIO-prefixed names keep their tags separate from external-snapshotter.
+
 Cloud Build uses the files supplied by its source trigger without fetching
 upstream controller repositories or restoring Git metadata. Configure the trusted
 postsubmit/tag job to use the root config and provide `_GIT_TAG`,

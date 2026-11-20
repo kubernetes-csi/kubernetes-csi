@@ -27,10 +27,10 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
@@ -39,12 +39,9 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	libconfig "github.com/kubernetes-csi/csi-lib-utils/config"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
-	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	"github.com/kubernetes-csi/csi-lib-utils/rpc"
-	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/attacher/pkg/attacher"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/attacher/pkg/controller"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/attacher/pkg/features"
@@ -59,7 +56,7 @@ const (
 
 // Command line flags
 
-func attacher_main(ctx context.Context) {
+func attacher_main(ctx context.Context, config *rest.Config) {
 
 	logger := klog.Background()
 
@@ -83,12 +80,6 @@ func attacher_main(ctx context.Context) {
 		addr = *httpEndpoint
 	}
 
-	// Create the client config. Use kubeconfig if given, otherwise assume in-cluster.
-	config, err := libconfig.BuildConfig(*kubeconfig, standardflags.Configuration)
-	if err != nil {
-		logger.Error(err, "Failed to build a Kubernetes config")
-		klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-	}
 	config.ContentType = runtime.ContentTypeProtobuf
 
 	if *workerThreads == 0 {
@@ -248,7 +239,7 @@ func attacher_main(ctx context.Context) {
 		ctx, terminate = context.WithCancel(ctx) // shuts down the whole process, incl. leader election
 		var cancelControllerCtx context.CancelFunc
 		controllerCtx, cancelControllerCtx = context.WithCancel(ctx)
-		shutdownHandler = server.SetupSignalHandler()
+		shutdownHandler = processShutdown
 
 		defer terminate()
 
@@ -273,15 +264,7 @@ func attacher_main(ctx context.Context) {
 		}
 	}
 
-	leaderelection.RunWithLeaderElection(
-		ctx,
-		config,
-		standardflags.Configuration,
-		run,
-		"external-attacher-leader-"+csiAttacher,
-		mux,
-		utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit),
-	)
+	runAIOController(ctx, run, mux, utilfeature.DefaultFeatureGate.Enabled(features.ReleaseLeaderElectionOnExit))
 }
 
 func supportsControllerCapabilities(ctx context.Context, csiConn *grpc.ClientConn) (bool, bool, bool, bool, error) {

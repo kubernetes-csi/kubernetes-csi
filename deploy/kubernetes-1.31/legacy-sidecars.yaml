@@ -1,0 +1,53 @@
+# Hostpath E2E migration phase. The standalone image versions and arguments
+# come from the original AIO PoC hostpath fixture, with leader election enabled.
+spec:
+  template:
+    spec:
+      containers:
+        - name: csi-aio-resizer-attacher-provisioner-snapshotter
+          $patch: delete
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.5.0
+          args:
+            - --v=5
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v4.0.0
+          args:
+            - --v=5
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --leader-election
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.10.0
+          args:
+            - --v=5
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v8.2.0
+          args:
+            - --v=5
+            - --csi-address=/csi/csi.sock
+            - --leader-election
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi

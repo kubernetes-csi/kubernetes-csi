@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -119,6 +120,19 @@ class CloudBuildCITests(unittest.TestCase):
                                         capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("REV=" + revision, result.stdout.splitlines())
+
+    def test_publish_images_do_not_collide_with_individual_snapshotter(self):
+        registry = "registry.example/staging"
+        expected = {f"{registry}/csi-sidecars", f"{registry}/aio-snapshot-controller",
+                    f"{registry}/aio-snapshot-conversion-webhook"}
+        for target in ("push", "push-multiarch"):
+            with self.subTest(target=target):
+                result = subprocess.run(["make", "-n", target, f"REGISTRY_NAME={registry}",
+                                         "PULL_BASE_REF=main", "IMAGE_TAGS=canary", "REV=test"],
+                                        cwd=ci.ROOT, capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                names = set(re.findall(r"registry\.example/staging/[a-z-]+", result.stdout))
+                self.assertEqual(names, expected)
 
     def test_cloud_config_uses_locked_builder_without_sync(self):
         image = build_environment.select_image(build_environment.load(), arch="amd64")

@@ -74,6 +74,68 @@ run () {
     "$@"
 }
 
+legacy_leases=(
+    external-attacher-leader-hostpath-csi-k8s-io
+    hostpath-csi-k8s-io
+    external-resizer-hostpath-csi-k8s-io
+    external-snapshotter-leader-hostpath-csi-k8s-io
+)
+legacy_records=()
+legacy_lease_fields='{.metadata.uid}{"|"}{.spec.leaseTransitions}{"|"}{.spec.holderIdentity}'
+
+get_lease() {
+    kubectl -n default get "lease/$1" --ignore-not-found --request-timeout=5s -o "jsonpath=$2"
+}
+
+wait_for_lease() {
+    local lease="$1" fields="$2" expected="$3" record deadline=$((SECONDS + 180))
+    while (( SECONDS < deadline )); do
+        record="$(get_lease "$lease" "$fields")" || return 1
+        if [[ "$record" == $expected ]]; then
+            printf '%s\n' "$record"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "ERROR: timed out waiting for Lease $lease to match $expected (last state: $record)" >&2
+    return 1
+}
+
+# Run this only in Prow's disposable cluster. The create fails if another
+# hostpath StatefulSet already exists, so we cannot replace a running driver.
+run_legacy_sidecars() {
+    local manifest="$1" legacy lease record
+    legacy="$(kubectl patch --local -f - --type=strategic --patch-file "${BASE_DIR}/legacy-sidecars.yaml" -o yaml <<< "$manifest")"
+    run kubectl create --save-config -f - <<< "$legacy"
+    run kubectl -n default rollout status statefulset/csi-hostpathplugin --timeout=5m
+    for lease in "${legacy_leases[@]}"; do
+        record="$(wait_for_lease "$lease" "$legacy_lease_fields" '?*|[0-9]*|?*')"
+        legacy_records+=("$record")
+    done
+
+    # Stop all old controllers before replacing the Pod template with AIO.
+    run kubectl -n default scale statefulset/csi-hostpathplugin --replicas=0
+    run kubectl -n default wait --for=delete pod/csi-hostpathplugin-0 --timeout=2m
+}
+
+verify_lease_migration() {
+    local fields='{.spec.holderIdentity}{"|"}{.metadata.annotations.aio\.csi\.k8s\.io/migration-status}{"|"}{.metadata.annotations.aio\.csi\.k8s\.io/migration-release-pending}'
+    wait_for_lease csi-sidecars-hostpath-csi-k8s-io "$fields" '?*|completed|' >/dev/null
+
+    local i lease uid transitions record expected
+    for i in "${!legacy_leases[@]}"; do
+        lease="${legacy_leases[i]}"
+        IFS='|' read -r uid transitions _ <<< "${legacy_records[i]}"
+        expected="$uid|$((transitions + 1))|"
+        record="$(get_lease "$lease" "$legacy_lease_fields")"
+        if [[ "$record" != "$expected" ]]; then
+            echo "ERROR: legacy Lease $lease was not taken over and released (before: ${legacy_records[i]}, after: $record)" >&2
+            return 1
+        fi
+    done
+    echo "Verified migration of all four hostpath sidecar Leases"
+}
+
 # Users and hostpath e2e share one manually maintained RBAC manifest.
 # Image overrides do not change permissions; see deploy/README.md.
 echo "applying shared RBAC rules"
@@ -117,6 +179,9 @@ for i in $(ls ${BASE_DIR}/hostpath/*.yaml | sort); do
         fi
         echo "$line"
     done)"
+    if [[ -n "${CSI_PROW_TEST_DRIVER}" && "${i##*/}" == csi-hostpath-plugin.yaml ]]; then
+        run_legacy_sidecars "$modified"
+    fi
     if ! echo "$modified" | kubectl apply -f -; then
         echo "modified version of $i:"
         echo "$modified"
@@ -163,6 +228,7 @@ done
 
 # Write the test driver configuration expected by Prow.
 if [ "${CSI_PROW_TEST_DRIVER}" ]; then
+    verify_lease_migration
     cp "${BASE_DIR}/test-driver.yaml" "${CSI_PROW_TEST_DRIVER}"
 
     # When testing late binding, pods must be forced to run on the

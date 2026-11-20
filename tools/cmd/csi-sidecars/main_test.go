@@ -17,15 +17,223 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"errors"
 	goflag "flag"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/cmd/csi-sidecars/config"
 	attacherconfig "github.com/kubernetes-csi/csi-sidecars/pkg/attacher/cmd/csi-attacher/config"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
+
+type notReadyDriver struct {
+	csi.UnimplementedIdentityServer
+	probed chan struct{}
+}
+
+func (driver *notReadyDriver) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
+	select {
+	case driver.probed <- struct{}{}:
+	default:
+	}
+	return &csi.ProbeResponse{Ready: wrapperspb.Bool(false)}, nil
+}
+
+func TestSignalDuringControllerStartup(t *testing.T) {
+	if os.Getenv("CSI_AIO_TEST_CHILD") == "1" {
+		os.Args = []string{"csi-sidecars", "--controllers=attacher", "--kubeconfig=" + os.Getenv("CSI_AIO_TEST_KUBECONFIG"), "--csi-address=" + os.Getenv("CSI_AIO_TEST_SOCKET")}
+		main()
+		return
+	}
+
+	// Keep the socket path short enough for the Unix socket limit on macOS.
+	dir, err := os.MkdirTemp("/tmp", "csi-aio-signal-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	socket := filepath.Join(dir, "csi.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	driver := &notReadyDriver{probed: make(chan struct{}, 1)}
+	csi.RegisterIdentityServer(server, driver)
+	go server.Serve(listener)
+	defer server.Stop()
+
+	kubeconfig := filepath.Join(dir, "config")
+	config := "apiVersion: v1\nkind: Config\nclusters:\n- name: test\n  cluster:\n    server: https://127.0.0.1:6443\ncontexts:\n- name: test\n  context:\n    cluster: test\n    user: test\ncurrent-context: test\nusers:\n- name: test\n  user: {}\n"
+	if err := os.WriteFile(kubeconfig, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestSignalDuringControllerStartup$")
+	cmd.Env = append(os.Environ(), "CSI_AIO_TEST_CHILD=1", "CSI_AIO_TEST_KUBECONFIG="+kubeconfig, "CSI_AIO_TEST_SOCKET="+socket)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-driver.probed:
+	case err := <-done:
+		t.Fatalf("process exited before CSI probe: %v", err)
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("process did not reach CSI probe")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("process failed after SIGTERM: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		<-done
+		t.Fatal("process did not stop after SIGTERM while the CSI driver was not ready")
+	}
+}
+
+func TestBuildAIOKubeConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig := func(name string, cfg clientcmdapi.Config) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := clientcmd.WriteToFile(cfg, path); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	const explicitHost = "https://explicit.example"
+	const envHost = "https://environment.example"
+	const masterHost = "https://master.example"
+	explicit := writeConfig("explicit", clientcmdapi.Config{
+		Clusters:       map[string]*clientcmdapi.Cluster{"explicit": {Server: explicitHost}},
+		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"explicit": {Token: "explicit-token"}},
+		Contexts:       map[string]*clientcmdapi.Context{"explicit": {Cluster: "explicit", AuthInfo: "explicit"}},
+		CurrentContext: "explicit",
+	})
+	envContext := writeConfig("env-context", clientcmdapi.Config{
+		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"env": {Token: "env-token"}},
+		Contexts:       map[string]*clientcmdapi.Context{"env": {Cluster: "env", AuthInfo: "env"}},
+		CurrentContext: "env",
+	})
+	envCluster := writeConfig("env-cluster", clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{"env": {Server: envHost}},
+	})
+	t.Setenv("KUBECONFIG", strings.Join([]string{envContext, envCluster}, string(os.PathListSeparator)))
+
+	for _, tc := range []struct {
+		name, kubeconfig, master, host, token string
+	}{
+		{name: "explicit kubeconfig takes precedence", kubeconfig: explicit, host: explicitHost, token: "explicit-token"},
+		{name: "environment kubeconfig merges paths", host: envHost, token: "env-token"},
+		{name: "master overrides environment server", master: masterHost, host: masterHost, token: "env-token"},
+		{name: "master overrides explicit server", kubeconfig: explicit, master: masterHost, host: masterHost, token: "explicit-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := buildAIOKubeConfig(standardflags.SidecarConfiguration{
+				KubeConfig: tc.kubeconfig, KubeAPIQPS: 12.5, KubeAPIBurst: 23,
+			}, tc.master)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Host != tc.host {
+				t.Errorf("API server = %q, want %q", cfg.Host, tc.host)
+			}
+			if cfg.BearerToken != tc.token {
+				t.Error("credentials did not come from the expected kubeconfig")
+			}
+			if cfg.QPS != 12.5 || cfg.Burst != 23 {
+				t.Errorf("QPS and Burst = %v and %d, want 12.5 and 23", cfg.QPS, cfg.Burst)
+			}
+		})
+	}
+}
+
+func TestControllerStopped(t *testing.T) {
+	previous := processShutdown
+	shutdown := make(chan struct{})
+	processShutdown = shutdown
+	t.Cleanup(func() { processShutdown = previous })
+
+	if err := controllerStopped("Attacher"); err == nil {
+		t.Fatal("unexpected controller exit must fail the AIO process")
+	}
+	close(shutdown)
+	if err := controllerStopped("Attacher"); err != nil {
+		t.Fatalf("signal-driven shutdown returned an error: %v", err)
+	}
+}
+
+func TestWaitForControllersDrainsOnPeerFailure(t *testing.T) {
+	shutdown := make(chan struct{})
+	var once sync.Once
+	requestShutdown := func() { once.Do(func() { close(shutdown) }) }
+	results := make(chan error, 2)
+	var active controllerLifecycle
+	if !active.begin(shutdown) {
+		t.Fatal("controller should start")
+	}
+	returned := make(chan error, 1)
+	go func() {
+		returned <- waitForControllers(shutdown, results, requestShutdown, &active)
+	}()
+
+	want := errors.New("attacher stopped")
+	results <- want
+	select {
+	case <-shutdown:
+	case <-time.After(5 * time.Second):
+		t.Fatal("peer failure did not request shutdown")
+	}
+	select {
+	case <-returned:
+		t.Fatal("shutdown returned before the other controller drained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	active.finish()
+	select {
+	case got := <-returned:
+		if got != want {
+			t.Fatalf("waitForControllers() = %v, want %v", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not finish after controller drain")
+	}
+}
+
+func TestWaitForControllersReportsBufferedFailureOnSignal(t *testing.T) {
+	shutdown := make(chan struct{})
+	results := make(chan error, 1)
+	want := errors.New("provisioner stopped")
+	results <- want
+	close(shutdown)
+	var active controllerLifecycle
+	if got := waitForControllers(shutdown, results, func() {}, &active); got != want {
+		t.Fatalf("waitForControllers() = %v, want %v", got, want)
+	}
+}
 
 // TestParseControllers covers the --controllers parsing, including the
 // edge cases that the previous inline strings.Split produced (an empty value
@@ -206,7 +414,6 @@ func TestCopyFlagsFromConfigToGlobalVars(t *testing.T) {
 
 	// Set distinct sentinel values on the source config so a mis-aliased
 	// pointer would surface as a wrong/zero value.
-	config.Configuration.Master = "https://master.example"
 	config.Configuration.Resync = 7 * time.Minute
 	config.Configuration.RetryIntervalStart = 3 * time.Second
 	config.Configuration.RetryIntervalMax = 11 * time.Minute
@@ -228,7 +435,6 @@ func TestCopyFlagsFromConfigToGlobalVars(t *testing.T) {
 	copyFlagsFromConfigToGlobalVars()
 
 	// AIO-specific.
-	assertPtr(t, "master", master, config.Configuration.Master)
 	assertPtr(t, "resync", resync, config.Configuration.Resync)
 	assertPtr(t, "resyncPeriod", resyncPeriod, config.Configuration.Resync)
 	assertPtr(t, "retryIntervalStart", retryIntervalStart, config.Configuration.RetryIntervalStart)

@@ -44,10 +44,16 @@ Kubernetes cluster, replacing the paths with your configuration:
   --kubeconfig=/path/to/kubeconfig
 ```
 
+AIO uses the same Kubernetes configuration for all controllers and leader
+election. `--kubeconfig` takes precedence over `KUBECONFIG`, and `--master`
+overrides the API server URL. When none is set, AIO uses in-cluster configuration.
+
 The enabled controllers require the corresponding driver capabilities and
 Kubernetes permissions; snapshot support also requires the snapshot CRDs and
 separate snapshot-controller. Multiple controllers cannot yet share
 `--http-endpoint` or `--metrics-address`.
+For a migration from individual sidecars, follow the stop-before-start and
+legacy Lease steps in the [deployment guide](deploy/README.md).
 
 Build and inspect local container images without publishing them:
 
@@ -129,6 +135,10 @@ wrapper requires the Go-version handoff and passes that version to release-tools
 which builds all three commands for Linux amd64/arm64 and publishes their images.
 The builder digest in the YAML must match the build-environment lock; a tooling
 test and runtime preflight enforce this.
+
+The staging images are published as `csi-sidecars`, `aio-snapshot-controller`,
+and `aio-snapshot-conversion-webhook` under `gcr.io/k8s-staging-sig-storage`.
+The AIO-prefixed names keep their tags separate from external-snapshotter.
 
 Cloud Build uses the files supplied by its source trigger without fetching
 upstream controller repositories or restoring Git metadata. Configure the trusted

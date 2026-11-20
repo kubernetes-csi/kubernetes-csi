@@ -13,6 +13,11 @@ TEST_FMT_FILTER_CMD = | grep -v '^./tmp/'
 
 include release-tools/build.make
 
+# These commands also exist in external-snapshotter. Keep every published tag,
+# including architecture-specific and release tags, separate from that project.
+push-snapshot-controller push-multiarch-snapshot-controller: IMAGE_NAME = $(REGISTRY_NAME)/aio-snapshot-controller
+push-snapshot-conversion-webhook push-multiarch-snapshot-conversion-webhook: IMAGE_NAME = $(REGISTRY_NAME)/aio-snapshot-conversion-webhook
+
 # The inherited release-tools build-% compiles each command with a plain
 # `go build` (stamping main.version from REV). Builds use the vendor/ directory
 # automatically when it is present, so a populated tree needs no sync first.

@@ -47,7 +47,6 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/klog/v2"
 
-	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
 	_ "k8s.io/component-base/metrics/prometheus/workqueue"               // register work queues in the default legacy registry
 )
@@ -88,7 +87,7 @@ func resizer_main(ctx context.Context, config *rest.Config) {
 
 	mux := http.NewServeMux()
 
-	metricsManager := metrics.NewCSIMetricsManager("" /* driverName */)
+	metricsManager := newAIOMetricsManager("resizer", "")
 
 	csiClient, err := csi.New(ctx, standardflags.Configuration.CSIAddress, *timeout, metricsManager)
 	if err != nil {
@@ -105,7 +104,7 @@ func resizer_main(ctx context.Context, config *rest.Config) {
 
 	translator := csitrans.New()
 	if translator.IsMigratedCSIDriverByName(driverName) {
-		metricsManager = metrics.NewCSIMetricsManagerWithOptions(driverName, metrics.WithMigration())
+		metricsManager = newAIOMetricsManager("resizer", driverName, metrics.WithMigration())
 		migratedCsiClient, err := csi.New(ctx, standardflags.Configuration.CSIAddress, *timeout, metricsManager)
 		if err != nil {
 			klog.ErrorS(err, "Failed to create MigratedCSI client")
@@ -114,10 +113,6 @@ func resizer_main(ctx context.Context, config *rest.Config) {
 		csiClient.CloseConnection()
 		csiClient = migratedCsiClient
 	}
-
-	// Add default legacy registry so that metrics manager serves Go runtime and process metrics.
-	// Also registers the `k8s.io/component-base/` work queue and leader election metrics we anonymously import.
-	metricsManager.WithAdditionalRegistry(legacyregistry.DefaultGatherer)
 
 	csiResizer, err := resizer.NewResizerFromClient(
 		csiClient,
@@ -151,16 +146,11 @@ func resizer_main(ctx context.Context, config *rest.Config) {
 
 	// Start HTTP server for metrics + leader election healthz
 	if addr != "" {
-		metricsManager.RegisterToServer(mux, standardflags.Configuration.MetricsPath)
 		metricsManager.SetDriverName(driverName)
-		go func() {
-			klog.InfoS("ServeMux listening", "address", addr)
-			err := http.ListenAndServe(addr, mux)
-			if err != nil {
-				klog.ErrorS(err, "Failed to start HTTP server", "address", addr, "metricsPath", standardflags.Configuration.MetricsPath)
-				klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-			}
-		}()
+		if err := sharedHTTP.listen(addr, mux, metricsManager.GetRegistry()); err != nil {
+			klog.ErrorS(err, "Failed to start HTTP server", "address", addr, "metricsPath", standardflags.Configuration.MetricsPath)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
 	}
 
 	var rc controller.ResizeController

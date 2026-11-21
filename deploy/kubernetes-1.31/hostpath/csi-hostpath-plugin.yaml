@@ -130,6 +130,11 @@ spec:
             - --csi-address=/csi/csi.sock
             - --controllers=resizer,attacher,provisioner,snapshotter
             - --leader-election
+            - --http-endpoint=:18080
+          readinessProbe:
+            httpGet:
+              path: /healthz/leader-election
+              port: 18080
           securityContext:
             # This is necessary only for systems with SELinux, where
             # non-privileged sidecar containers cannot access unix domain socket

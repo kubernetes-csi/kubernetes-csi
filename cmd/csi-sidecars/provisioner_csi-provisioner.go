@@ -31,7 +31,6 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -115,11 +114,7 @@ func provisioner_main(ctx context.Context, config *rest.Config) {
 		}
 	}
 
-	metricsManager := metrics.NewCSIMetricsManagerWithOptions("", /* driverName */
-		// Will be provided via default gatherer.
-		metrics.WithProcessStartTime(false),
-		metrics.WithSubsystem(metrics.SubsystemSidecar),
-	)
+	metricsManager := newAIOMetricsManager("provisioner", "")
 
 	grpcClient, err := ctrl.Connect(ctx, standardflags.Configuration.CSIAddress, metricsManager)
 	if err != nil {
@@ -151,10 +146,7 @@ func provisioner_main(ctx context.Context, config *rest.Config) {
 		klog.V(2).Infof("Supports migration from in-tree plugin: %s", supportsMigrationFromInTreePluginName)
 
 		// Create a new connection with the metrics manager with migrated label
-		metricsManager = metrics.NewCSIMetricsManagerWithOptions(provisionerName,
-			// Will be provided via default gatherer.
-			metrics.WithProcessStartTime(false),
-			metrics.WithMigration())
+		metricsManager = newAIOMetricsManager("provisioner", provisionerName, metrics.WithMigration())
 		migratedGrpcClient, err := ctrl.Connect(ctx, standardflags.Configuration.CSIAddress, metricsManager)
 		if err != nil {
 			klog.Error(err.Error())
@@ -172,17 +164,6 @@ func provisioner_main(ctx context.Context, config *rest.Config) {
 
 	// Prepare http endpoint for metrics + leader election healthz
 	mux := http.NewServeMux()
-	gatherers := prometheus.Gatherers{
-		// For workqueue and leader election metrics, set up via the anonymous imports of:
-		// https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/component-base/metrics/prometheus/workqueue/metrics.go
-		// https://github.com/kubernetes/kubernetes/blob/master/staging/src/k8s.io/component-base/metrics/prometheus/clientgo/leaderelection/metrics.go
-		//
-		// Also to happens to include Go runtime and process metrics:
-		// https://github.com/kubernetes/kubernetes/blob/9780d88cb6a4b5b067256ecb4abf56892093ee87/staging/src/k8s.io/component-base/metrics/legacyregistry/registry.go#L46-L49
-		legacyregistry.DefaultGatherer,
-		// For CSI operations.
-		metricsManager.GetRegistry(),
-	}
 
 	pluginCapabilities, controllerCapabilities, err := ctrl.GetDriverCapabilities(grpcClient, *operationTimeout)
 	if err != nil {
@@ -458,18 +439,6 @@ func provisioner_main(ctx context.Context, config *rest.Config) {
 			m.PersistentVolumeDeleteDurationSeconds,
 		}...)
 		provisionerOptions = append(provisionerOptions, controller.MetricsInstance(m))
-		gatherers = append(gatherers, reg)
-
-		// This is similar to k8s.io/component-base/metrics HandlerWithReset
-		// except that we gather from multiple sources. This is necessary
-		// because both CSI metrics manager and component-base manage
-		// their own registry. Probably could be avoided by making
-		// CSI metrics manager a bit more flexible.
-		mux.Handle(standardflags.Configuration.MetricsPath,
-			promhttp.InstrumentMetricHandler(
-				reg,
-				promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{}),
-			))
 
 		if *enableProfile {
 			klog.InfoS("Starting profiling", "endpoint", standardflags.Configuration.HttpEndpoint)
@@ -480,13 +449,9 @@ func provisioner_main(ctx context.Context, config *rest.Config) {
 			mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 			mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 		}
-		go func() {
-			klog.Infof("ServeMux listening at %q", addr)
-			err := http.ListenAndServe(addr, mux)
-			if err != nil {
-				klog.Fatalf("Failed to start HTTP server at specified address (%q) and metrics path (%q): %s", addr, standardflags.Configuration.MetricsPath, err)
-			}
-		}()
+		if err := sharedHTTP.listen(addr, mux, metricsManager.GetRegistry(), reg); err != nil {
+			klog.Fatalf("Failed to start HTTP server at specified address (%q) and metrics path (%q): %s", addr, standardflags.Configuration.MetricsPath, err)
+		}
 	}
 
 	provisionController = controller.NewProvisionController(

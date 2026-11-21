@@ -41,13 +41,11 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/kubernetes-csi/csi-lib-utils/connection"
-	"github.com/kubernetes-csi/csi-lib-utils/metrics"
 	csirpc "github.com/kubernetes-csi/csi-lib-utils/rpc"
 	"github.com/kubernetes-csi/csi-lib-utils/standardflags"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/snapshotter/pkg/features"
 	controller "github.com/kubernetes-csi/csi-sidecars/pkg/snapshotter/pkg/sidecar-controller"
 	"github.com/kubernetes-csi/csi-sidecars/pkg/snapshotter/pkg/snapshotter"
-	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
 	_ "k8s.io/component-base/metrics/prometheus/workqueue"               // register work queues in the default legacy registry
 
@@ -127,7 +125,7 @@ func snapshotter_main(ctx context.Context, config *rest.Config) {
 	}
 
 	// Connect to CSI.
-	metricsManager := metrics.NewCSIMetricsManager("" /* driverName */)
+	metricsManager := newAIOMetricsManager("snapshotter", "")
 	csiConn, err := connection.Connect(
 		ctx,
 		standardflags.Configuration.CSIAddress,
@@ -151,22 +149,13 @@ func snapshotter_main(ctx context.Context, config *rest.Config) {
 
 	klog.V(2).Infof("CSI driver name: %q", driverName)
 
-	// Add default legacy registry so that metrics manager serves Go runtime and process metrics.
-	// Also registers the `k8s.io/component-base/` work queue and leader election metrics we anonymously import.
-	metricsManager.WithAdditionalRegistry(legacyregistry.DefaultGatherer)
-
 	// Prepare http endpoint for metrics + leader election healthz
 	mux := http.NewServeMux()
 	if addr != "" {
-		metricsManager.RegisterToServer(mux, standardflags.Configuration.MetricsPath)
 		metricsManager.SetDriverName(driverName)
-		go func() {
-			klog.Infof("ServeMux listening at %q", addr)
-			err := http.ListenAndServe(addr, mux)
-			if err != nil {
-				klog.Fatalf("Failed to start HTTP server at specified address (%q) and metrics path (%q): %s", addr, standardflags.Configuration.MetricsPath, err)
-			}
-		}()
+		if err := sharedHTTP.listen(addr, mux, metricsManager.GetRegistry()); err != nil {
+			klog.Fatalf("Failed to start HTTP server at specified address (%q) and metrics path (%q): %s", addr, standardflags.Configuration.MetricsPath, err)
+		}
 	}
 
 	// Check it's ready

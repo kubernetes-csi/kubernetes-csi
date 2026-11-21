@@ -32,7 +32,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/component-base/metrics/legacyregistry"
 	_ "k8s.io/component-base/metrics/prometheus/clientgo/leaderelection" // register leader election in the default legacy registry
 	_ "k8s.io/component-base/metrics/prometheus/workqueue"               // register work queues in the default legacy registry
 	csitrans "k8s.io/csi-translation-lib"
@@ -95,7 +94,7 @@ func attacher_main(ctx context.Context, config *rest.Config) {
 
 	factory := informers.NewSharedInformerFactory(clientset, *resync)
 	var handler controller.Handler
-	metricsManager := metrics.NewCSIMetricsManager("" /* driverName */)
+	metricsManager := newAIOMetricsManager("attacher", "")
 
 	// Connect to CSI.
 	connection.SetMaxGRPCLogLength(*maxGRPCLogLength)
@@ -125,7 +124,7 @@ func attacher_main(ctx context.Context, config *rest.Config) {
 
 	translator := csitrans.New()
 	if translator.IsMigratedCSIDriverByName(csiAttacher) {
-		metricsManager = metrics.NewCSIMetricsManagerWithOptions(csiAttacher, metrics.WithMigration())
+		metricsManager = newAIOMetricsManager("attacher", csiAttacher, metrics.WithMigration())
 		migratedCsiClient, err := connection.Connect(ctx, *csiAddress, metricsManager, connection.OnConnectionLoss(connection.ExitOnConnectionLoss()))
 		if err != nil {
 			logger.Error(err, "Failed to connect to the CSI driver", "csiAddress", *csiAddress, "migrated", true)
@@ -141,23 +140,14 @@ func attacher_main(ctx context.Context, config *rest.Config) {
 		}
 	}
 
-	// Add default legacy registry so that metrics manager serves Go runtime and process metrics.
-	// Also registers the `k8s.io/component-base/` work queue and leader election metrics we anonymously import.
-	metricsManager.WithAdditionalRegistry(legacyregistry.DefaultGatherer)
-
 	// Prepare http endpoint for metrics + leader election healthz
 	mux := http.NewServeMux()
 	if addr != "" {
-		metricsManager.RegisterToServer(mux, *metricsPath)
 		metricsManager.SetDriverName(csiAttacher)
-		go func() {
-			logger.Info("ServeMux listening", "address", addr, "metricsPath", *metricsPath)
-			err := http.ListenAndServe(addr, mux)
-			if err != nil {
-				logger.Error(err, "Failed to start HTTP server at specified address and metrics path", "address", addr, "metricsPath", *metricsPath)
-				klog.FlushAndExit(klog.ExitFlushTimeout, 1)
-			}
-		}()
+		if err := sharedHTTP.listen(addr, mux, metricsManager.GetRegistry()); err != nil {
+			logger.Error(err, "Failed to start HTTP server at specified address and metrics path", "address", addr, "metricsPath", *metricsPath)
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
 	}
 
 	cancelationCtx, cancel = context.WithTimeout(ctx, csiTimeout)

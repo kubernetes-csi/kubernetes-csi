@@ -358,6 +358,40 @@ commit.message = new_message.encode()
       sed -i 's/\.\.\.until SIGINT/...until context cancellation/' "${NEW_FILE}"
     fi
 
+    # Only the AIO entrypoints join the process-wide listener. Each controller
+    # keeps its mux for health and profiling, and contributes its CSI registry.
+    if [[ ${FILE##*/} == main.go || ${FILE##*/} == csi-provisioner.go ]]; then
+      registries='metricsManager.GetRegistry()'
+      if [[ ${SIDECAR} == provisioner ]]; then
+        # Provisioner also exports PV/PVC operation metrics from reg.
+        registries+=', reg'
+        sed -i '
+          /"github.com\/prometheus\/client_golang\/prometheus\/promhttp"/d
+          /metricsManager := metrics.NewCSIMetricsManagerWithOptions(/,/^\t)$/c\
+            metricsManager := newAIOMetricsManager("provisioner", "")
+          /metricsManager = metrics.NewCSIMetricsManagerWithOptions(provisionerName,/,/metrics.WithMigration())/c\
+            metricsManager = newAIOMetricsManager("provisioner", provisionerName, metrics.WithMigration())
+          /gatherers := prometheus.Gatherers{/,/^\t}$/d
+          /gatherers = append(gatherers, reg)/,/^\t\t\t))$/d
+        ' "${NEW_FILE}"
+      else
+        sed -i -e '/"k8s.io\/component-base\/metrics\/legacyregistry"/d' \
+               -e '/\/\/ Add default legacy registry/,/metricsManager.WithAdditionalRegistry/d' \
+               -e '/metricsManager.RegisterToServer(mux,/d' \
+               -e "s/metrics.NewCSIMetricsManager(\"\" .*driverName.*)/newAIOMetricsManager(\"${SIDECAR}\", \"\")/" \
+               -e "s/metrics.NewCSIMetricsManagerWithOptions(/newAIOMetricsManager(\"${SIDECAR}\", /" "${NEW_FILE}"
+        if [[ ${SIDECAR} == snapshotter ]]; then
+          sed -i '/"github.com\/kubernetes-csi\/csi-lib-utils\/metrics"/d' "${NEW_FILE}"
+        fi
+      fi
+      # Replace the per-controller server goroutine, preserving its bind error handling.
+      sed -i "/^\tif addr != \"\" {$/,/^\t}$/ {
+        /^\t\tgo func() {$/,/^\t\t\tif err != nil {$/c\\
+          if err := sharedHTTP.listen(addr, mux, ${registries}); err != nil {
+        /^\t\t}()$/d
+      }" "${NEW_FILE}"
+    fi
+
     add_generation_marker "${NEW_FILE}" "external-${SIDECAR}"
   done
   if [[ ${SIDECAR} == attacher ]]; then
@@ -406,6 +440,10 @@ python3 -B tools/scripts/image_inputs.py generate
 # Reformat files changed by import-path and entrypoint transformations. Symlinked
 # maintained sources are excluded because they are checked independently.
 find cmd pkg -type f -name '*.go' -print0 | xargs -0 gofmt -w
+
+# Shared HTTP server for the assembled controller entrypoints.
+symlink_from_root_to_tools tools/cmd/csi-sidecars/http_endpoint.go
+symlink_from_root_to_tools tools/cmd/csi-sidecars/http_endpoint_test.go
 
 # The new entrypoint for all the sidecars
 symlink_from_root_to_tools tools/cmd/csi-sidecars/main.go
